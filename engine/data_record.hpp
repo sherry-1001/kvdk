@@ -67,6 +67,7 @@ struct DataMeta {
   RecordType type;
   uint16_t k_size;
   uint32_t v_size;
+  ExpiredType expired_when;
 };
 
 // Header and metadata of a data record
