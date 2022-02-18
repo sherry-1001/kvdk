@@ -361,6 +361,28 @@ void compare_excange_if_larger(std::atomic<T>& num, T target) {
 // Return the number of process unit (PU) that are bound to the kvdk instance
 int get_usable_pu(void);
 
+/* Return the UNIX time in microseconds */
+static long long ustime(void) {
+  struct timeval tv;
+  long long ust;
+
+  gettimeofday(&tv, NULL);
+  ust = ((long long)tv.tv_sec) * 1000000;
+  ust += tv.tv_usec;
+  return ust;
+}
+
+/* Return the UNIX time in milliseconds */
+static long long mstime(void) { return ustime() / 1000; }
+
+static inline unsigned long long getticks(void) {
+  unsigned int lo, hi;
+
+  // RDTSC copies contents of 64-bit TSC into EDX:EAX
+  asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return (unsigned long long)hi << 32 | lo;
+}
+
 namespace CollectionUtils {
 inline static StringView ExtractUserKey(const StringView& internal_key) {
   constexpr size_t sz_id = sizeof(CollectionIDType);

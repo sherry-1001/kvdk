@@ -293,28 +293,28 @@ class EngineBasicTest : public testing::Test {
   int cnt;
 };
 
-TEST_F(EngineBasicTest, TestThreadManager) {
-  int max_access_threads = 1;
-  configs.max_access_threads = max_access_threads;
-  ASSERT_EQ(Engine::Open(db_path.c_str(), &engine, configs, stdout),
-            Status::Ok);
-  std::string key("k");
-  std::string val("value");
+// TEST_F(EngineBasicTest, TestThreadManager) {
+//   int max_access_threads = 1;
+//   configs.max_access_threads = max_access_threads;
+//   ASSERT_EQ(Engine::Open(db_path.c_str(), &engine, configs, stdout),
+//             Status::Ok);
+//   std::string key("k");
+//   std::string val("value");
 
-  ASSERT_EQ(engine->Set(key, val), Status::Ok);
+//   ASSERT_EQ(engine->Set(key, val), Status::Ok);
 
-  // Reach max access threads
-  auto s = std::async(&Engine::Set, engine, key, val);
-  ASSERT_EQ(s.get(), Status::TooManyAccessThreads);
-  // Manually release access thread
-  engine->ReleaseAccessThread();
-  s = std::async(&Engine::Set, engine, key, val);
-  ASSERT_EQ(s.get(), Status::Ok);
-  // Release access thread on thread exits
-  s = std::async(&Engine::Set, engine, key, val);
-  ASSERT_EQ(s.get(), Status::Ok);
-  delete engine;
-}
+//   // Reach max access threads
+//   auto s = std::async(&Engine::Set, engine, key, val);
+//   ASSERT_EQ(s.get(), Status::TooManyAccessThreads);
+//   // Manually release access thread
+//   engine->ReleaseAccessThread();
+//   s = std::async(&Engine::Set, engine, key, val);
+//   ASSERT_EQ(s.get(), Status::Ok);
+//   // Release access thread on thread exits
+//   s = std::async(&Engine::Set, engine, key, val);
+//   ASSERT_EQ(s.get(), Status::Ok);
+//   delete engine;
+// }
 
 // Test iterator/backup/checkpoint on a snapshot
 TEST_F(EngineBasicTest, TestBasicSnapshot) {
@@ -1965,6 +1965,62 @@ TEST_F(EngineBasicTest, TestSortedSyncPoint) {
 }
 
 #endif
+
+TEST_F(EngineBasicTest, TestStringExpire) {
+  int n_thread_reading = 16;
+  int n_thread_writing = 16;
+  configs.max_access_threads = n_thread_writing + n_thread_reading;
+  ASSERT_EQ(Engine::Open(db_path.c_str(), &engine, configs, stdout),
+            Status::Ok);
+
+  int count = 10;
+
+  for (int i = 0; i < count; ++i) {
+    std::string key = "expired_key" + std::to_string(i);
+    std::string val(10, 'a');
+    std::string val2(10, 'b');
+    ASSERT_EQ(engine->Set(key, val, INT32_MAX), Status::Ok);
+    ASSERT_EQ(engine->Set(key, val2, 200), Status::Ok);
+  }
+
+  delete engine;
+}
+
+// TEST_F(EngineBasicTest, TestInplaceStringExpire) {
+//   int n_thread_reading = 16;
+//   int n_thread_writing = 16;
+//   configs.max_access_threads = n_thread_writing + n_thread_reading;
+//   ASSERT_EQ(Engine::Open(db_path.c_str(), &engine, configs, stdout),
+//             Status::Ok);
+
+//   std::string key = "expired_key";
+//   std::string val(10, 'a');
+
+//   std::vector<std::thread> ths;
+//   SyncPoint::GetInstance()->DisableProcessing();
+//   SyncPoint::GetInstance()->Reset();
+//   SyncPoint::GetInstance()->LoadDependency(
+//       {{"Set1", "Set2"},
+//        {"Set1F", "Get"},
+//        {"In-place change expired time", "Get Validate Before"}});
+//   SyncPoint::GetInstance()->EnableProcessing();
+//   ths.emplace_back(std::thread([&]() {
+//     TEST_SYNC_POINT("Set1");
+//     ASSERT_EQ(engine->Set(key, val, INT32_MAX), Status::Ok);
+//     TEST_SYNC_POINT("Set1F");
+//   }));
+//   ths.emplace_back(std::thread([&]() {
+//     TEST_SYNC_POINT("Set2");
+//     ASSERT_EQ(engine->Set(key, val, 200), Status::Ok);
+//   }));
+//   ths.emplace_back(std::thread([&]() {
+//     TEST_SYNC_POINT("Get");
+//     std::string got_val;
+//     ASSERT_EQ(engine->Get(key, &got_val), Status::Ok);
+//   }));
+
+//   delete engine;
+// }
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);

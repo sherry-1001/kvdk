@@ -38,7 +38,8 @@ class Engine {
 
   // Insert a STRING-type KV to set "key" to hold "value", return Ok on
   // successful persistence, return non-Ok on any error.
-  virtual Status Set(const StringView key, const StringView value) = 0;
+  virtual Status Set(const StringView key, const StringView value,
+                     int64_t ttl_time = 0) = 0;
 
   virtual Status BatchWrite(const WriteBatch& write_batch) = 0;
 

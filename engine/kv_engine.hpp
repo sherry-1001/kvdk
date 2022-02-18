@@ -62,8 +62,12 @@ class KVEngine : public Engine {
 
   // Global Anonymous Collection
   Status Get(const StringView key, std::string* value) override;
-  Status Set(const StringView key, const StringView value) override;
+  Status Set(const StringView key, const StringView value,
+             int64_t ttl_time = 0) override;
   Status Delete(const StringView key) override;
+
+  Status BatchDelete(const std::vector<StringView>& keys,
+                     std::unique_lock<SpinMutex> ul);
   Status BatchWrite(const WriteBatch& write_batch) override;
 
   // Sorted Collection
@@ -201,7 +205,8 @@ class KVEngine : public Engine {
 
   Status MaybeInitPendingBatchFile();
 
-  Status StringSetImpl(const StringView& key, const StringView& value);
+  Status StringSetImpl(const StringView& key, const StringView& value,
+                       int64_t ttl_time);
 
   Status StringDeleteImpl(const StringView& key);
 
@@ -355,6 +360,9 @@ class KVEngine : public Engine {
   // Run in background to free obsolete DRAM space
   void backgroundDramCleaner();
 
+  uint64_t ExpiredCleaner();
+  void backgroundExpiredCleaner();
+
   // void backgroundWorkCoordinator();
 
   void startBackgroundWorks();
@@ -399,6 +407,7 @@ class KVEngine : public Engine {
     std::condition_variable_any pmem_usage_reporter_cv;
     std::condition_variable_any pmem_allocator_organizer_cv;
     std::condition_variable_any dram_cleaner_cv;
+    std::condition_variable_any expired_cleander_cv;
 
     SpinMutex terminating_lock;
     bool terminating = false;

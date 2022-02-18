@@ -28,6 +28,7 @@ enum RecordType : uint16_t {
   QueueHeadRecord = (1 << 10),
   QueueTailRecord = (1 << 11),
   QueueRecord = (1 << 12),
+  Expired = (1<<13),
 
   Padding = 1 << 15,
 };
@@ -91,6 +92,7 @@ struct StringRecord {
  public:
   DataEntry entry;
   PMemOffsetType older_version_record;
+  ExpiredTime expired_time;
   char data[0];
 
   // Construct a StringRecord instance at target_address. As the record need
@@ -101,20 +103,18 @@ struct StringRecord {
   static StringRecord* ConstructStringRecord(
       void* target_address, uint32_t _record_size, TimeStampType _timestamp,
       RecordType _record_type, PMemOffsetType _older_version_record,
-      const StringView& _key, const StringView& _value) {
+      const StringView& _key, const StringView& _value, TTLTime ttl_time = 0) {
     StringRecord* record = new (target_address)
         StringRecord(_record_size, _timestamp, _record_type,
-                     _older_version_record, _key, _value);
+                     _older_version_record, ttl_time, _key, _value);
     return record;
   }
 
   // Construct and persist a string record at pmem address "addr"
-  static StringRecord* PersistStringRecord(void* addr, uint32_t record_size,
-                                           TimeStampType timestamp,
-                                           RecordType type,
-                                           PMemOffsetType older_version_record,
-                                           const StringView& key,
-                                           const StringView& value);
+  static StringRecord* PersistStringRecord(
+      void* addr, uint32_t record_size, TimeStampType timestamp,
+      RecordType type, PMemOffsetType older_version_record,
+      const StringView& key, const StringView& value, ExpiredTime ttl_time = 0);
 
   void Destroy() { entry.Destroy(); }
 
@@ -145,12 +145,17 @@ struct StringRecord {
  private:
   StringRecord(uint32_t _record_size, TimeStampType _timestamp,
                RecordType _record_type, PMemOffsetType _older_version_record,
-               const StringView& _key, const StringView& _value)
+               TTLTime ttl_time, const StringView& _key,
+               const StringView& _value)
       : entry(0, _record_size, _timestamp, _record_type, _key.size(),
               _value.size()),
-        older_version_record(_older_version_record) {
+        older_version_record(_older_version_record),
+        expired_time(0) {
     assert(_record_type == StringDataRecord ||
            _record_type == StringDeleteRecord);
+    if (ttl_time > 0) {
+      expired_time = ttl_time;  // expired_time = ttl+ current_ts;
+    }
     memcpy(data, _key.data(), _key.size());
     memcpy(data + _key.size(), _value.data(), _value.size());
     entry.header.checksum = Checksum();

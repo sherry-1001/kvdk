@@ -91,7 +91,7 @@ bool HashTable::MatchHashEntry(const StringView& key, uint32_t hash_k_prefix,
     if (__glibc_likely(data_entry_metadata != nullptr)) {
       memcpy(data_entry_metadata, pmem_record, sizeof(DataEntry));
     }
-
+    
     if (equal_string_view(key, data_entry_key)) {
       return true;
     }

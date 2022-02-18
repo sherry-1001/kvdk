@@ -54,8 +54,8 @@ KVEngine::~KVEngine() {
   GlobalLogger.Info("Closing instance ... \n");
   GlobalLogger.Info("Waiting bg threads exit ... \n");
   closing_ = true;
+  ExpiredCleaner();
   terminateBackgroundWorks();
-
   ReportPMemUsage();
   GlobalLogger.Info("Instance closed\n");
 }
@@ -93,12 +93,14 @@ void KVEngine::startBackgroundWorks() {
   bg_threads_.emplace_back(&KVEngine::backgroundOldRecordCleaner, this);
   bg_threads_.emplace_back(&KVEngine::backgroundDramCleaner, this);
   bg_threads_.emplace_back(&KVEngine::backgroundPMemUsageReporter, this);
+  // bg_threads_.emplace_back(&KVEngine::backgroundExpiredCleaner, this);
 }
 
 void KVEngine::terminateBackgroundWorks() {
   {
     std::unique_lock<SpinMutex> ul(bg_work_signals_.terminating_lock);
     bg_work_signals_.terminating = true;
+    // bg_work_signals_.expired_cleander_cv.notify_all();
     bg_work_signals_.old_records_cleaner_cv.notify_all();
     bg_work_signals_.dram_cleaner_cv.notify_all();
     bg_work_signals_.pmem_allocator_organizer_cv.notify_all();
@@ -175,7 +177,6 @@ Status KVEngine::Init(const std::string& name, const Configs& configs) {
 
   s = Recovery();
   startBackgroundWorks();
-
   ReportPMemUsage();
   kvdk_assert(pmem_allocator_->PMemUsageInBytes() >= 0, "Invalid PMem Usage");
   return s;
@@ -515,14 +516,22 @@ Status KVEngine::RestoreStringRecord(StringRecord* pmem_record,
   }
 
   bool found = s == Status::Ok;
-  if (found &&
-      existing_data_entry.meta.timestamp >= cached_entry.meta.timestamp) {
+  if ((found &&
+       existing_data_entry.meta.timestamp >= cached_entry.meta.timestamp) ||
+      (pmem_record->expired_time < version_controller_.GetCurrentTimestamp())) {
     purgeAndFree(pmem_record);
     return Status::Ok;
   }
 
-  hash_table_->Insert(hint, entry_ptr, cached_entry.meta.type, pmem_record,
-                      HashIndexType::StringRecord);
+  if (pmem_record->expired_time > 0) {
+    hash_table_->Insert(hint, entry_ptr, cached_entry.meta.type, pmem_record,
+                        HashIndexType::StringRecord);
+  } else {
+    hash_table_->Insert(hint, entry_ptr,
+                        cached_entry.meta.type & RecordType::Expired,
+                        pmem_record, HashIndexType::StringRecord);
+  }
+
   if (found) {
     purgeAndFree(hash_entry.index.ptr);
   }
@@ -974,6 +983,7 @@ Status KVEngine::HashGetImpl(const StringView& key, std::string* value,
     char data_buffer[record_size];
     memcpy(data_buffer, pmem_record, record_size);
     // If the pmem data record is corrupted or modified during get, redo search
+    TEST_SYNC_POINT("Get Validate Before");
     if (ValidateRecordAndGetValue(data_buffer, data_entry.header.checksum,
                                   value)) {
       break;
@@ -1497,7 +1507,7 @@ Status KVEngine::StringDeleteImpl(const StringView& key) {
 
   {
     auto hint = hash_table_->GetHint(key);
-    std::unique_lock<SpinMutex> ul(*hint.spin);
+    // std::unique_lock<SpinMutex> ul(*hint.spin);
     // Set current snapshot to this thread
     version_controller_.HoldLocalSnapshot();
     defer(version_controller_.ReleaseLocalSnapshot());
@@ -1529,10 +1539,15 @@ Status KVEngine::StringDeleteImpl(const StringView& key) {
 
         hash_table_->Insert(hint, entry_ptr, StringDeleteRecord, pmem_ptr,
                             HashIndexType::StringRecord);
-        ul.unlock();
-        delayFree(OldDataRecord{hash_entry.index.string_record, new_ts});
-        // We also delay free this delete record to recycle PMem and DRAM space
-        delayFree(OldDeleteRecord{pmem_ptr, new_ts, entry_ptr, hint.spin});
+        // ul.unlock();
+        old_records_cleaner_.Push(
+            OldDataRecord{hash_entry.index.string_record, new_ts});
+        old_records_cleaner_.Push(
+            OldDeleteRecord{pmem_ptr, new_ts, entry_ptr, hint.spin});
+        // delayFree(OldDataRecord{hash_entry.index.string_record, new_ts});
+        // // We also delay free this delete record to recycle PMem and DRAM
+        // space delayFree(OldDeleteRecord{pmem_ptr, new_ts, entry_ptr,
+        // hint.spin});
 
         return s;
       }
@@ -1544,7 +1559,8 @@ Status KVEngine::StringDeleteImpl(const StringView& key) {
   }
 }
 
-Status KVEngine::StringSetImpl(const StringView& key, const StringView& value) {
+Status KVEngine::StringSetImpl(const StringView& key, const StringView& value,
+                               int64_t ttl_time) {
   DataEntry data_entry;
   HashEntry hash_entry;
   HashEntry* hash_entry_ptr = nullptr;
@@ -1580,18 +1596,30 @@ Status KVEngine::StringSetImpl(const StringView& key, const StringView& value) {
 
     kvdk_assert(!found || new_ts > data_entry.meta.timestamp,
                 "old record has newer timestamp!");
+    if (found) {
+      auto string_record = static_cast<StringRecord*>(block_base);
+      string_record->expired_time = ttl_time;
+      TEST_SYNC_POINT("In-place change expired time");
+    }
+  
     // Persist key-value pair to PMem
     StringRecord::PersistStringRecord(
         block_base, sized_space_entry.size, new_ts, StringDataRecord,
         found ? pmem_allocator_->addr2offset_checked(
                     hash_entry.index.string_record)
               : kNullPMemOffset,
-        key, value);
+        key, value, ttl_time);
 
     auto updated_type = hash_entry_ptr->header.data_type;
     // Write hash index
-    hash_table_->Insert(hint, hash_entry_ptr, StringDataRecord, block_base,
-                        HashIndexType::StringRecord);
+    if (ttl_time > 0) {
+      hash_table_->Insert(hint, hash_entry_ptr, StringDataRecord | Expired,
+                          block_base, HashIndexType::StringRecord);
+    } else {
+      hash_table_->Insert(hint, hash_entry_ptr, StringDataRecord, block_base,
+                          HashIndexType::StringRecord);
+    }
+
     if (found && updated_type == StringDataRecord /* delete record is self-freed, so we don't need to free it here */) {
       ul.unlock();
       delayFree(OldDataRecord{hash_entry.index.string_record, new_ts});
@@ -1601,7 +1629,8 @@ Status KVEngine::StringSetImpl(const StringView& key, const StringView& value) {
   return Status::Ok;
 }
 
-Status KVEngine::Set(const StringView key, const StringView value) {
+Status KVEngine::Set(const StringView key, const StringView value,
+                     int64_t ttl_time) {
   Status s = MaybeInitAccessThread();
   if (s != Status::Ok) {
     return s;
@@ -1610,11 +1639,10 @@ Status KVEngine::Set(const StringView key, const StringView value) {
   if (!CheckKeySize(key) || !CheckValueSize(value)) {
     return Status::InvalidDataSize;
   }
-  return StringSetImpl(key, value);
+  return StringSetImpl(key, value, ttl_time);
 }
 
 }  // namespace KVDK_NAMESPACE
-
 namespace KVDK_NAMESPACE {
 std::shared_ptr<UnorderedCollection> KVEngine::createUnorderedCollection(
     StringView const collection_name) {
@@ -2216,6 +2244,89 @@ void KVEngine::backgroundDramCleaner() {
     }
     FreeSkiplistDramNodes();
   }
+}
+
+uint64_t KVEngine::ExpiredCleaner() {
+  uint64_t num_entries =
+      (configs_.hash_bucket_size - 8 /* next pointer */) / sizeof(HashEntry);
+  uint64_t cleaned_kv = 0;
+  uint64_t scan_kv = 0;
+  // Iterate hash table
+  auto start_ts = std::chrono::system_clock::now();
+  for (uint64_t slot_idx = 0; slot_idx < hash_table_->slots_.size();
+       ++slot_idx) {
+    if (cleaned_kv > 0 & (cleaned_kv % kMaxCachedOldRecords == 0) &&
+        !bg_cleaner_processing_) {
+      bg_work_signals_.old_records_cleaner_cv.notify_all();
+    }
+    std::unique_lock<SpinMutex> lock_slot{hash_table_->slots_[slot_idx].spin};
+    auto now = mstime();
+    for (uint64_t bucket_idx = 0; bucket_idx < configs_.num_buckets_per_slot;
+         ++bucket_idx) {
+      char* bucket_ptr =
+          (char*)hash_table_->main_buckets_ +
+          slot_idx * configs_.num_buckets_per_slot * configs_.hash_bucket_size +
+          bucket_idx * configs_.hash_bucket_size;
+      _mm_prefetch(bucket_ptr, _MM_HINT_T0);
+      for (uint64_t entry_idx = 0;
+           entry_idx <
+           hash_table_
+               ->hash_bucket_entries_[slot_idx * configs_.num_buckets_per_slot +
+                                      bucket_idx];
+           ++entry_idx) {
+        if (entry_idx > 0 && entry_idx % num_entries == 0) {
+          // memcpy_8(&bucket_ptr, bucket_ptr + configs_.hash_bucket_size - 8);
+          bucket_ptr = bucket_ptr + configs_.hash_bucket_size - 8;
+          _mm_prefetch(bucket_ptr, _MM_HINT_T0);
+        }
+        HashEntry* entry =
+            hash_table_->HashTableIter(bucket_ptr, entry_idx % num_entries);
+        scan_kv++;
+        if (!entry->Empty() &&
+            entry->header.index_type == HashIndexType::StringRecord &&
+            (entry->header.data_type & RecordType::Expired)) {
+          //   // check is expried;
+          //   if (entry->index.string_record->expired_time <= now) {
+          //     // auto s = Delete(entry->index.string_record->Key());
+          //     // if (s != Status::Ok) {
+          //     //   throw std::runtime_error{"Delete Fail"};
+          //     // }
+          //     // cleaned_kv++;
+          //   }
+        }
+      }
+    }
+  }
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now() - start_ts);
+  auto avg = scan_kv / duration.count();
+  GlobalLogger.Info(
+      "Iterator Hash Table cost time: %ld ms, scan kvs num: %ld, cleaned kvs "
+      "num: %ld, scan kvs/ms: "
+      "%ld\n",
+      duration.count(), scan_kv, cleaned_kv, avg);
+  GlobalLogger.Info("Cleaned Expired Keys: %lld\n", cleaned_kv);
+  return avg;
+}
+
+void KVEngine::backgroundExpiredCleaner() {
+  // auto interval = std::chrono::milliseconds{
+  //     static_cast<std::uint64_t>(configs_.background_work_interval * 1000)};
+  uint64_t avg_throughputs = 0;
+  int scan_times = 1;
+  while (!bg_work_signals_.terminating) {
+    bg_cleaner_processing_ = false;
+    // {
+    //   std::unique_lock<SpinMutex> ul(bg_work_signals_.terminating_lock);
+    //   if (!bg_work_signals_.terminating) {
+    //     bg_work_signals_.expired_cleander_cv.wait_for(ul, interval);
+    //   }
+    // }
+    avg_throughputs += ExpiredCleaner();
+    scan_times++;
+  }
+  GlobalLogger.Info("%ld %ld Avg Scan kvs/ms: %ld\n", avg_throughputs,
+                    scan_times, avg_throughputs / scan_times);
 }
 
 }  // namespace KVDK_NAMESPACE

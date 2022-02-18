@@ -20,7 +20,7 @@ using namespace KVDK_NAMESPACE;
 #define MAX_LAT (10000000)
 
 // Benchmark configs
-DEFINE_string(path, "/mnt/pmem0/kvdk", "Instance path");
+DEFINE_string(path, "/mnt/pmem0/kvdk-expired", "Instance path");
 
 DEFINE_uint64(num_kv, (1 << 30), "Number of KVs to place");
 
@@ -189,7 +189,7 @@ void DBWrite(int tid) {
     switch (bench_data_type) {
       case DataType::String: {
         if (FLAGS_batch_size == 0) {
-          s = engine->Set(key, value);
+          s = engine->Set(key, value, 1);
         } else {
           batch.Put(key, std::string(value.data(), value.size()));
           if (batch.Size() == FLAGS_batch_size) {
@@ -505,7 +505,7 @@ int main(int argc, char** argv) {
     printf("calculate latencies\n");
     read_latencies.resize(read_threads, std::vector<std::uint64_t>(MAX_LAT, 0));
     write_latencies.resize(write_threads,
-                           std::vector<std::uint64_t>(MAX_LAT, 0));
+                           std::vector<std::uint64_t>(MAX_LAT+1, 0));
   }
 
   if (bench_data_type == DataType::Sorted) {

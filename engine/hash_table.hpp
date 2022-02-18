@@ -91,6 +91,7 @@ struct HashCache {
 struct Slot {
   HashCache hash_cache;
   SpinMutex spin;
+  bool has_expired = false;
 };
 
 class HashTable {
@@ -147,6 +148,20 @@ class HashTable {
   void Insert(const KeyHashHint& hint, HashEntry* entry_ptr, uint16_t type,
               void* index, HashIndexType index_type);
 
+  // Iterator hash hable
+  HashEntry* HashTableIter(char* bucket_ptr, uint64_t entry_idx) {
+    return (HashEntry*)(bucket_ptr) + entry_idx;
+  }
+
+ public:
+  Array<Slot> slots_;
+  std::vector<uint64_t> hash_bucket_entries_;
+  inline uint32_t get_slot_num(uint32_t bucket) {
+    return bucket / num_buckets_per_slot_;
+  }
+  void* main_buckets_;
+  const uint64_t num_entries_per_bucket_;
+
  private:
   HashTable(uint64_t hash_bucket_num, uint32_t hash_bucket_size,
             uint32_t num_buckets_per_slot,
@@ -166,10 +181,6 @@ class HashTable {
     return key_hash_value & (hash_bucket_num_ - 1);
   }
 
-  inline uint32_t get_slot_num(uint32_t bucket) {
-    return bucket / num_buckets_per_slot_;
-  }
-
   // Check if "key" of data type "target_type" is indexed by "hash_entry". If
   // matches, copy data entry of data record of "key" to "data_entry_metadata"
   // and return true, otherwise return false.
@@ -177,14 +188,10 @@ class HashTable {
                       uint16_t target_type, const HashEntry* hash_entry,
                       DataEntry* data_entry_metadata);
 
-  std::vector<uint64_t> hash_bucket_entries_;
   const uint64_t hash_bucket_num_;
   const uint32_t num_buckets_per_slot_;
   const uint32_t hash_bucket_size_;
-  const uint64_t num_entries_per_bucket_;
-  Array<Slot> slots_;
   std::shared_ptr<PMEMAllocator> pmem_allocator_;
   ChunkBasedAllocator dram_allocator_;
-  void* main_buckets_;
 };
 }  // namespace KVDK_NAMESPACE

@@ -19,4 +19,6 @@ using CollectionIDType = std::uint64_t;
 using KeyHashType = std::uint64_t;
 using CompFunc =
     std::function<int(const StringView& src, const StringView& target)>;
+using ExpiredTime = std::int64_t;
+using TTLTime = std::int64_t;
 }  // namespace KVDK_NAMESPACE
