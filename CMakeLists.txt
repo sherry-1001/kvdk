@@ -63,6 +63,7 @@ set(SOURCES
         engine/data_record.cpp
         engine/queue.cpp
         engine/version/old_records_cleaner.cpp
+        replicator/kvdk_wrapper.cpp
         )
 
 # .a library
