@@ -28,7 +28,7 @@ enum RecordType : uint16_t {
   QueueHeadRecord = (1 << 10),
   QueueTailRecord = (1 << 11),
   QueueRecord = (1 << 12),
-  Expired = (1<<13),
+  Expired = (1 << 13),
 
   Padding = 1 << 15,
 };

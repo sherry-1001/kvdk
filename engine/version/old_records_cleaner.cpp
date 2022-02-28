@@ -42,6 +42,7 @@ void OldRecordsCleaner::TryGlobalClean() {
   std::deque<OldDataRecord> data_record_refered;
   std::deque<OldDeleteRecord> delete_record_refered;
   PendingFreeSpaceEntries space_pending;
+
   // Update recorded oldest snapshot up to state so we can know which records
   // can be freed
   kv_engine_->version_controller_.UpdatedOldestSnapshot();
@@ -84,6 +85,8 @@ void OldRecordsCleaner::TryGlobalClean() {
     for (auto& record : data_records) {
       if (record.release_time <= oldest_snapshot_ts) {
         space_to_free.emplace_back(purgeOldDataRecord(record));
+        DataEntry* data_entry =
+            static_cast<DataEntry*>(record.pmem_data_record);
       } else {
         data_record_refered.emplace_back(record);
       }
@@ -112,6 +115,7 @@ void OldRecordsCleaner::TryGlobalClean() {
   auto iter = pending_free_space_entries_.begin();
   while (iter != pending_free_space_entries_.end()) {
     if (iter->release_time < oldest_snapshot_ts) {
+      delete_records += iter->entries.size();
       kv_engine_->pmem_allocator_->BatchFree(iter->entries);
       iter++;
     } else {
@@ -121,9 +125,9 @@ void OldRecordsCleaner::TryGlobalClean() {
   pending_free_space_entries_.erase(pending_free_space_entries_.begin(), iter);
 
   if (space_to_free.size() > 0) {
+    delete_records += space_to_free.size();
     kv_engine_->pmem_allocator_->BatchFree(space_to_free);
   }
-
   global_old_data_records_.clear();
   global_old_data_records_.emplace_back(data_record_refered);
   global_old_delete_records_.clear();

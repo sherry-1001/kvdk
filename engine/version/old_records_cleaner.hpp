@@ -85,5 +85,6 @@ class OldRecordsCleaner {
   std::vector<std::deque<OldDeleteRecord>> global_old_delete_records_;
   std::deque<PendingFreeSpaceEntries> pending_free_space_entries_;
   TimeStampType clean_all_data_record_ts_{0};
+  std::atomic<int64_t> delete_records{0};
 };
 }  // namespace KVDK_NAMESPACE

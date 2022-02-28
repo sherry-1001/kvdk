@@ -54,7 +54,6 @@ KVEngine::~KVEngine() {
   GlobalLogger.Info("Closing instance ... \n");
   GlobalLogger.Info("Waiting bg threads exit ... \n");
   closing_ = true;
-  ExpiredCleaner();
   terminateBackgroundWorks();
   ReportPMemUsage();
   GlobalLogger.Info("Instance closed\n");
@@ -89,21 +88,21 @@ void KVEngine::ReportPMemUsage() {
 void KVEngine::startBackgroundWorks() {
   std::unique_lock<SpinMutex> ul(bg_work_signals_.terminating_lock);
   bg_work_signals_.terminating = false;
-  bg_threads_.emplace_back(&KVEngine::backgroundPMemAllocatorOrgnizer, this);
+  // bg_threads_.emplace_back(&KVEngine::backgroundPMemAllocatorOrgnizer, this);
   bg_threads_.emplace_back(&KVEngine::backgroundOldRecordCleaner, this);
   bg_threads_.emplace_back(&KVEngine::backgroundDramCleaner, this);
   bg_threads_.emplace_back(&KVEngine::backgroundPMemUsageReporter, this);
-  // bg_threads_.emplace_back(&KVEngine::backgroundExpiredCleaner, this);
+  bg_threads_.emplace_back(&KVEngine::backgroundExpiredCleaner, this);
 }
 
 void KVEngine::terminateBackgroundWorks() {
   {
     std::unique_lock<SpinMutex> ul(bg_work_signals_.terminating_lock);
     bg_work_signals_.terminating = true;
-    // bg_work_signals_.expired_cleander_cv.notify_all();
+    bg_work_signals_.expired_cleander_cv.notify_all();
     bg_work_signals_.old_records_cleaner_cv.notify_all();
     bg_work_signals_.dram_cleaner_cv.notify_all();
-    bg_work_signals_.pmem_allocator_organizer_cv.notify_all();
+    // bg_work_signals_.pmem_allocator_organizer_cv.notify_all();
     bg_work_signals_.pmem_usage_reporter_cv.notify_all();
   }
   for (auto& t : bg_threads_) {
@@ -1507,7 +1506,7 @@ Status KVEngine::StringDeleteImpl(const StringView& key) {
 
   {
     auto hint = hash_table_->GetHint(key);
-    // std::unique_lock<SpinMutex> ul(*hint.spin);
+    std::unique_lock<SpinMutex> ul(*hint.spin);
     // Set current snapshot to this thread
     version_controller_.HoldLocalSnapshot();
     defer(version_controller_.ReleaseLocalSnapshot());
@@ -1539,16 +1538,10 @@ Status KVEngine::StringDeleteImpl(const StringView& key) {
 
         hash_table_->Insert(hint, entry_ptr, StringDeleteRecord, pmem_ptr,
                             HashIndexType::StringRecord);
-        // ul.unlock();
-        old_records_cleaner_.Push(
-            OldDataRecord{hash_entry.index.string_record, new_ts});
-        old_records_cleaner_.Push(
-            OldDeleteRecord{pmem_ptr, new_ts, entry_ptr, hint.spin});
-        // delayFree(OldDataRecord{hash_entry.index.string_record, new_ts});
-        // // We also delay free this delete record to recycle PMem and DRAM
-        // space delayFree(OldDeleteRecord{pmem_ptr, new_ts, entry_ptr,
-        // hint.spin});
-
+        ul.unlock();
+        delayFree(OldDataRecord{hash_entry.index.string_record, new_ts});
+        // We also delay free this delete record to recycle PMem and DRAM space
+        delayFree(OldDeleteRecord{pmem_ptr, new_ts, entry_ptr, hint.spin});
         return s;
       }
       case Status::NotFound:
@@ -1599,9 +1592,8 @@ Status KVEngine::StringSetImpl(const StringView& key, const StringView& value,
     if (found) {
       auto string_record = static_cast<StringRecord*>(block_base);
       string_record->expired_time = ttl_time;
-      TEST_SYNC_POINT("In-place change expired time");
     }
-  
+
     // Persist key-value pair to PMem
     StringRecord::PersistStringRecord(
         block_base, sized_space_entry.size, new_ts, StringDataRecord,
@@ -2201,6 +2193,7 @@ void KVEngine::backgroundOldRecordCleaner() {
       }
     }
     bg_cleaner_processing_ = true;
+
     old_records_cleaner_.TryGlobalClean();
   }
 }
@@ -2247,18 +2240,21 @@ void KVEngine::backgroundDramCleaner() {
 }
 
 uint64_t KVEngine::ExpiredCleaner() {
+  Status s = MaybeInitAccessThread();
+  ReportPMemUsage();
+  if (s != Status::Ok) {
+    std::runtime_error("BackGround Init access thread fail!");
+  }
   uint64_t num_entries =
       (configs_.hash_bucket_size - 8 /* next pointer */) / sizeof(HashEntry);
   uint64_t cleaned_kv = 0;
   uint64_t scan_kv = 0;
+  int64_t time = 0;
   // Iterate hash table
   auto start_ts = std::chrono::system_clock::now();
   for (uint64_t slot_idx = 0; slot_idx < hash_table_->slots_.size();
        ++slot_idx) {
-    if (cleaned_kv > 0 & (cleaned_kv % kMaxCachedOldRecords == 0) &&
-        !bg_cleaner_processing_) {
-      bg_work_signals_.old_records_cleaner_cv.notify_all();
-    }
+    old_expired_records_cleaner_.TryCleanCachedOldRecords(num_entries);
     std::unique_lock<SpinMutex> lock_slot{hash_table_->slots_[slot_idx].spin};
     auto now = mstime();
     for (uint64_t bucket_idx = 0; bucket_idx < configs_.num_buckets_per_slot;
@@ -2268,12 +2264,11 @@ uint64_t KVEngine::ExpiredCleaner() {
           slot_idx * configs_.num_buckets_per_slot * configs_.hash_bucket_size +
           bucket_idx * configs_.hash_bucket_size;
       _mm_prefetch(bucket_ptr, _MM_HINT_T0);
-      for (uint64_t entry_idx = 0;
-           entry_idx <
-           hash_table_
-               ->hash_bucket_entries_[slot_idx * configs_.num_buckets_per_slot +
-                                      bucket_idx];
-           ++entry_idx) {
+      uint64_t entries =
+          hash_table_
+              ->hash_bucket_entries_[slot_idx * configs_.num_buckets_per_slot +
+                                     bucket_idx];
+      for (uint64_t entry_idx = 0; entry_idx < entries; ++entry_idx) {
         if (entry_idx > 0 && entry_idx % num_entries == 0) {
           // memcpy_8(&bucket_ptr, bucket_ptr + configs_.hash_bucket_size - 8);
           bucket_ptr = bucket_ptr + configs_.hash_bucket_size - 8;
@@ -2282,17 +2277,13 @@ uint64_t KVEngine::ExpiredCleaner() {
         HashEntry* entry =
             hash_table_->HashTableIter(bucket_ptr, entry_idx % num_entries);
         scan_kv++;
-        if (!entry->Empty() &&
-            entry->header.index_type == HashIndexType::StringRecord &&
-            (entry->header.data_type & RecordType::Expired)) {
-          //   // check is expried;
-          //   if (entry->index.string_record->expired_time <= now) {
-          //     // auto s = Delete(entry->index.string_record->Key());
-          //     // if (s != Status::Ok) {
-          //     //   throw std::runtime_error{"Delete Fail"};
-          //     // }
-          //     // cleaned_kv++;
-          //   }
+        if (entry->header.index_type == HashIndexType::StringRecord &&
+            (entry->index.string_record->expired_time <= now)) {
+          cleaned_kv++;
+          entry->Clear();
+          old_expired_records_cleaner_.Push(
+              OldDataRecord{entry->index.string_record,
+                            version_controller_.GetCurrentTimestamp()});
         }
       }
     }
@@ -2305,23 +2296,15 @@ uint64_t KVEngine::ExpiredCleaner() {
       "num: %ld, scan kvs/ms: "
       "%ld\n",
       duration.count(), scan_kv, cleaned_kv, avg);
-  GlobalLogger.Info("Cleaned Expired Keys: %lld\n", cleaned_kv);
+  ReportPMemUsage();
   return avg;
 }
 
 void KVEngine::backgroundExpiredCleaner() {
-  // auto interval = std::chrono::milliseconds{
-  //     static_cast<std::uint64_t>(configs_.background_work_interval * 1000)};
   uint64_t avg_throughputs = 0;
-  int scan_times = 1;
+  int scan_times = 0;
   while (!bg_work_signals_.terminating) {
     bg_cleaner_processing_ = false;
-    // {
-    //   std::unique_lock<SpinMutex> ul(bg_work_signals_.terminating_lock);
-    //   if (!bg_work_signals_.terminating) {
-    //     bg_work_signals_.expired_cleander_cv.wait_for(ul, interval);
-    //   }
-    // }
     avg_throughputs += ExpiredCleaner();
     scan_times++;
   }
