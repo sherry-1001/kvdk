@@ -125,7 +125,7 @@ class KVEngine : public Engine {
       : engine_thread_cache_(configs.max_access_threads),
         version_controller_(configs.max_access_threads),
         old_records_cleaner_(this, configs.max_access_threads),
-        old_expired_records_cleaner_(this, configs.max_access_threads){};
+        expired_records_cleaner_(this, configs_.max_access_threads){};
 
   struct BatchWriteHint {
     TimeStampType timestamp{0};
@@ -395,8 +395,7 @@ class KVEngine : public Engine {
   std::unique_ptr<SortedCollectionRebuilder> sorted_rebuilder_;
   VersionController version_controller_;
   OldRecordsCleaner old_records_cleaner_;
-
-  OldRecordsCleaner old_expired_records_cleaner_;
+  OldRecordsCleaner expired_records_cleaner_;
 
   bool bg_cleaner_processing_;
 

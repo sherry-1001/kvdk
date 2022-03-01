@@ -668,6 +668,7 @@ int main(int argc, char** argv) {
           } else if (l999 == 0 && (double)cur / wo > 0.999) {
             l999 = (double)i / 10;
           } else if (l9999 == 0 && (double)cur / wo > 0.9999) {
+            printf("latency: %lf %ld %ld %ld\n", cur, write_latencies[j][i], i, j);
             l9999 = (double)i / 10;
           }
         }

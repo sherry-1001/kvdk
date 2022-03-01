@@ -88,7 +88,7 @@ void KVEngine::ReportPMemUsage() {
 void KVEngine::startBackgroundWorks() {
   std::unique_lock<SpinMutex> ul(bg_work_signals_.terminating_lock);
   bg_work_signals_.terminating = false;
-  // bg_threads_.emplace_back(&KVEngine::backgroundPMemAllocatorOrgnizer, this);
+  bg_threads_.emplace_back(&KVEngine::backgroundPMemAllocatorOrgnizer, this);
   bg_threads_.emplace_back(&KVEngine::backgroundOldRecordCleaner, this);
   bg_threads_.emplace_back(&KVEngine::backgroundDramCleaner, this);
   bg_threads_.emplace_back(&KVEngine::backgroundPMemUsageReporter, this);
@@ -102,7 +102,7 @@ void KVEngine::terminateBackgroundWorks() {
     bg_work_signals_.expired_cleander_cv.notify_all();
     bg_work_signals_.old_records_cleaner_cv.notify_all();
     bg_work_signals_.dram_cleaner_cv.notify_all();
-    // bg_work_signals_.pmem_allocator_organizer_cv.notify_all();
+    bg_work_signals_.pmem_allocator_organizer_cv.notify_all();
     bg_work_signals_.pmem_usage_reporter_cv.notify_all();
   }
   for (auto& t : bg_threads_) {
@@ -2254,7 +2254,6 @@ uint64_t KVEngine::ExpiredCleaner() {
   auto start_ts = std::chrono::system_clock::now();
   for (uint64_t slot_idx = 0; slot_idx < hash_table_->slots_.size();
        ++slot_idx) {
-    old_expired_records_cleaner_.TryCleanCachedOldRecords(num_entries);
     std::unique_lock<SpinMutex> lock_slot{hash_table_->slots_[slot_idx].spin};
     auto now = mstime();
     for (uint64_t bucket_idx = 0; bucket_idx < configs_.num_buckets_per_slot;
@@ -2268,9 +2267,9 @@ uint64_t KVEngine::ExpiredCleaner() {
           hash_table_
               ->hash_bucket_entries_[slot_idx * configs_.num_buckets_per_slot +
                                      bucket_idx];
+      auto new_ts = version_controller_.GetCurrentTimestamp();
       for (uint64_t entry_idx = 0; entry_idx < entries; ++entry_idx) {
         if (entry_idx > 0 && entry_idx % num_entries == 0) {
-          // memcpy_8(&bucket_ptr, bucket_ptr + configs_.hash_bucket_size - 8);
           bucket_ptr = bucket_ptr + configs_.hash_bucket_size - 8;
           _mm_prefetch(bucket_ptr, _MM_HINT_T0);
         }
@@ -2281,9 +2280,9 @@ uint64_t KVEngine::ExpiredCleaner() {
             (entry->index.string_record->expired_time <= now)) {
           cleaned_kv++;
           entry->Clear();
-          old_expired_records_cleaner_.Push(
-              OldDataRecord{entry->index.string_record,
-                            version_controller_.GetCurrentTimestamp()});
+          expired_records_cleaner_.Push(
+              OldDataRecord{entry->index.string_record, new_ts});
+          // delayFree(OldDataRecord{entry->index.string_record, new_ts});
         }
       }
     }

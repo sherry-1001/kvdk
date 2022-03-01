@@ -50,15 +50,19 @@ struct PendingFreeSpaceEntries {
 class OldRecordsCleaner {
  public:
   OldRecordsCleaner(KVEngine* kv_engine, uint32_t max_access_threads)
-      : kv_engine_(kv_engine), cleaner_thread_cache_(max_access_threads) {
+      : kv_engine_(kv_engine),
+        cleaner_thread_cache_(max_access_threads),
+        cleaner_cache_(4) {
     assert(kv_engine_ != nullptr);
   }
 
   void Push(const OldDataRecord& old_data_record);
   void Push(const OldDeleteRecord& old_delete_record);
+
   // Try to clean global old records
   void TryGlobalClean();
   void TryCleanCachedOldRecords(size_t num_limit_clean);
+  void TryCleanCachedOldRecords();
   uint64_t NumCachedOldRecords() {
     assert(access_thread.id >= 0);
     auto& tc = cleaner_thread_cache_[access_thread.id];
@@ -81,9 +85,14 @@ class OldRecordsCleaner {
 
   Array<CleanerThreadCache> cleaner_thread_cache_;
 
-  std::vector<std::deque<OldDataRecord>> global_old_data_records_;
-  std::vector<std::deque<OldDeleteRecord>> global_old_delete_records_;
-  std::deque<PendingFreeSpaceEntries> pending_free_space_entries_;
+  void ParallelCleaner(uint64_t id, TimeStampType oldest_snapshot_ts);
+  struct thread_cache {
+    std::vector<std::deque<OldDataRecord>> global_old_data_records_;
+    std::vector<std::deque<OldDeleteRecord>> global_old_delete_records_;
+    std::deque<PendingFreeSpaceEntries> pending_free_space_entries_;
+  };
+
+  Array<thread_cache> cleaner_cache_;
   TimeStampType clean_all_data_record_ts_{0};
   std::atomic<int64_t> delete_records{0};
 };
