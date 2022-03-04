@@ -125,7 +125,9 @@ class KVEngine : public Engine {
       : engine_thread_cache_(configs.max_access_threads),
         version_controller_(configs.max_access_threads),
         old_records_cleaner_(this, configs.max_access_threads),
-        expired_records_cleaner_(this, configs_.max_access_threads){};
+        expired_records_cleaner_(this, configs_.max_access_threads),
+        expired_records_cleaner_1(this, configs_.max_access_threads),
+        lru_slot_ids_(configs_.max_access_threads){};
 
   struct BatchWriteHint {
     TimeStampType timestamp{0};
@@ -361,8 +363,9 @@ class KVEngine : public Engine {
   // Run in background to free obsolete DRAM space
   void backgroundDramCleaner();
 
-  uint64_t ExpiredCleaner();
+  uint64_t ExpiredCleaner(uint64_t start, uint64_t end);
   void backgroundExpiredCleaner();
+  void backgroundCleanerTwo();
 
   // void backgroundWorkCoordinator();
 
@@ -396,6 +399,14 @@ class KVEngine : public Engine {
   VersionController version_controller_;
   OldRecordsCleaner old_records_cleaner_;
   OldRecordsCleaner expired_records_cleaner_;
+  OldRecordsCleaner expired_records_cleaner_1;
+
+  // struct Info{
+  //   std::deque<uint64_t> slot_idx;
+  //   SpinMutex mutex;
+  // };
+  // std::vector<Info> lru_slot_ids_;
+  std::vector<uint64_t> lru_slot_ids_;
 
   bool bg_cleaner_processing_;
 

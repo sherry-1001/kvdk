@@ -92,6 +92,9 @@ class OldRecordsCleaner {
     std::deque<PendingFreeSpaceEntries> pending_free_space_entries_;
   };
 
+  std::vector<std::deque<OldDataRecord>> global_old_data_records_;
+  std::vector<std::deque<OldDeleteRecord>> global_old_delete_records_;
+  std::deque<PendingFreeSpaceEntries> pending_free_space_entries_;
   Array<thread_cache> cleaner_cache_;
   TimeStampType clean_all_data_record_ts_{0};
   std::atomic<int64_t> delete_records{0};
