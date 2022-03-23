@@ -26,16 +26,6 @@
 #include "utils/utils.hpp"
 
 namespace KVDK_NAMESPACE {
-constexpr uint64_t kMaxWriteBatchSize = (1 << 20);
-// fsdax mode align to 2MB by default.
-constexpr uint64_t kPMEMMapSizeUnit = (1 << 21);
-// Select a record every 10000 into restored skiplist map for multi-thread
-// restoring large skiplist.
-constexpr uint64_t kRestoreSkiplistStride = 10000;
-constexpr uint64_t kMaxCachedOldRecords = 10000;
-constexpr size_t kLimitForegroundCleanOldRecords = 1;
-constexpr int64_t kInvalidTTLTime = -2;
-constexpr int64_t kPersistTime = -1;
 
 void PendingBatch::PersistFinish() {
   num_kv = 0;
@@ -1624,14 +1614,18 @@ Status KVEngine::UpdateHeadWithExpiredTime(Skiplist* skiplist,
       continue;
     }
 
-    hash_table_->Insert(hint, entry_ptr, SortedHeaderRecord, skiplist,
-                        HashIndexType::Skiplist);
+    expired_time == -1
+        ? hash_table_->Insert(hint, entry_ptr, SortedHeaderRecord, skiplist,
+                              HashIndexType::Skiplist)
+        : hash_table_->Insert(hint, entry_ptr, SortedHeaderRecord, skiplist,
+                              HashIndexType::Skiplist, false);
     //(TODO) free head record
     break;
   }
   return Status::Ok;
 }
 
+// add hash entry flag.
 Status KVEngine::InplaceUpdatedExpiredTime(const StringView& str,
                                            ExpiredTimeType expired_time,
                                            RecordType record_type) {
@@ -1817,9 +1811,14 @@ Status KVEngine::StringSetImpl(const StringView& key, const StringView& value,
         key, value, expired_time);
 
     auto updated_type = hash_entry_ptr->GetRecordType();
+
     // Write hash index
-    hash_table_->Insert(hint, hash_entry_ptr, StringDataRecord, block_base,
-                        HashIndexType::StringRecord);
+    expired_time == -1
+        ? hash_table_->Insert(hint, hash_entry_ptr, StringDataRecord,
+                              block_base, HashIndexType::StringRecord)
+        : hash_table_->Insert(hint, hash_entry_ptr, StringDataRecord,
+                              block_base, HashIndexType::StringRecord, false);
+
     if (found && updated_type == StringDataRecord /* delete record is self-freed, so we don't need to free it here */) {
       ul.unlock();
       delayFree(OldDataRecord{hash_entry.GetIndex().string_record, new_ts});
@@ -2448,5 +2447,4 @@ void KVEngine::backgroundDramCleaner() {
     FreeSkiplistDramNodes();
   }
 }
-
 }  // namespace KVDK_NAMESPACE
