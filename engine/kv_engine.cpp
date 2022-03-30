@@ -930,6 +930,7 @@ Status KVEngine::SDeleteImpl(Skiplist* skiplist, const StringView& user_key) {
       case Status::PmemOverflow:
         return ret.s;
       case Status::Ok:
+        hash_table_->UpdateEntryStatus(ret.entry_ptr, HashEntryStatus::Expired);
         ul.unlock();
         if (ret.write_record != nullptr) {
           kvdk_assert(
@@ -938,10 +939,11 @@ Status KVEngine::SDeleteImpl(Skiplist* skiplist, const StringView& user_key) {
               "Wrong existing record type while insert a delete reocrd for "
               "sorted collection");
           delayFree(OldDataRecord{ret.existing_record, new_ts});
-          if (skiplist->IndexWithHashtable()) {
-            delayFree(OldDeleteRecord{ret.write_record, new_ts, ret.entry_ptr,
-                                      hint.spin});
-          }
+          // if (skiplist->IndexWithHashtable()) {
+          //   delayFree(OldDeleteRecord{ret.write_record, new_ts,
+          //   ret.entry_ptr,
+          //                             hint.spin});
+          // }
         }
         return ret.s;
       default:
@@ -1200,9 +1202,11 @@ Status KVEngine::BatchWrite(const WriteBatch& write_batch) {
       delayFree(OldDataRecord{batch_hints[i].data_record_to_free, ts});
     }
     if (batch_hints[i].delete_record_to_free != nullptr) {
-      delayFree(OldDeleteRecord{batch_hints[i].delete_record_to_free, ts,
-                                batch_hints[i].hash_entry_ptr,
-                                batch_hints[i].hash_hint.spin});
+      hash_table_->UpdateEntryStatus(batch_hints[i].hash_entry_ptr,
+                                     HashEntryStatus::Expired);
+      // delayFree(OldDeleteRecord{batch_hints[i].delete_record_to_free, ts,
+      //                           batch_hints[i].hash_entry_ptr,
+      //                           batch_hints[i].hash_hint.spin});
     }
     if (batch_hints[i].space_not_used) {
       pmem_allocator_->Free(batch_hints[i].allocated_space);
@@ -1236,9 +1240,10 @@ Status KVEngine::Modify(const StringView key, std::string* new_value,
   // push it into cleaner
   if (ret.s == Status::Expired) {
     hash_table_->UpdateEntryStatus(ret.entry_ptr, HashEntryStatus::Expired);
-    ul.unlock();
-    delayFree(OldDeleteRecord{ret.entry.GetIndex().ptr, new_ts, ret.entry_ptr,
-                              hint.spin});
+    // ul.unlock();
+    // delayFree(OldDeleteRecord{ret.entry.GetIndex().ptr, new_ts,
+    // ret.entry_ptr,
+    //                           hint.spin});
     return Status::NotFound;
   }
   if (ret.s == Status::Ok) {
@@ -1415,10 +1420,6 @@ Status KVEngine::Expire(const StringView str, TTLType ttl_time) {
     // deletion.
     if (res.entry_ptr->GetIndexType() == HashIndexType::StringRecord) {
       hash_table_->UpdateEntryStatus(res.entry_ptr, HashEntryStatus::Expired);
-      ul.unlock();
-      delayFree(OldDeleteRecord{res.entry_ptr->GetIndex().ptr,
-                                version_controller_.GetCurrentTimestamp(),
-                                res.entry_ptr, hint.spin});
     }
     return Status::NotFound;
   }
@@ -1507,10 +1508,11 @@ Status KVEngine::StringDeleteImpl(const StringView& key) {
 
         hash_table_->Insert(hint, entry_ptr, StringDeleteRecord, pmem_ptr,
                             HashIndexType::StringRecord);
+        hash_table_->UpdateEntryStatus(entry_ptr, HashEntryStatus::Expired);
         ul.unlock();
         delayFree(OldDataRecord{hash_entry.GetIndex().string_record, new_ts});
         // We also delay free this delete record to recycle PMem and DRAM space
-        delayFree(OldDeleteRecord{pmem_ptr, new_ts, entry_ptr, hint.spin});
+        // delayFree(OldDeleteRecord{pmem_ptr, new_ts, entry_ptr, hint.spin});
 
         return s;
       }
@@ -2036,18 +2038,19 @@ void KVEngine::delayFree(const OldDataRecord& old_data_record) {
   }
 }
 
-void KVEngine::delayFree(const OldDeleteRecord& old_delete_record) {
-  old_records_cleaner_.PushToCache(old_delete_record);
-  // To avoid too many cached old records pending clean, we try to clean cached
-  // records while pushing new one
-  if (old_records_cleaner_.NumCachedOldRecords() > kMaxCachedOldRecords &&
-      !bg_cleaner_processing_) {
-    bg_work_signals_.old_records_cleaner_cv.notify_all();
-  } else {
-    old_records_cleaner_.TryCleanCachedOldRecords(
-        kLimitForegroundCleanOldRecords);
-  }
-}
+// void KVEngine::delayFree(const OldDeleteRecord& old_delete_record) {
+//   old_records_cleaner_.PushToCache(old_delete_record);
+//   // To avoid too many cached old records pending clean, we try to clean
+//   cached
+//   // records while pushing new one
+//   if (old_records_cleaner_.NumCachedOldRecords() > kMaxCachedOldRecords &&
+//       !bg_cleaner_processing_) {
+//     bg_work_signals_.old_records_cleaner_cv.notify_all();
+//   } else {
+//     old_records_cleaner_.TryCleanCachedOldRecords(
+//         kLimitForegroundCleanOldRecords);
+//   }
+// }
 
 void KVEngine::backgroundOldRecordCleaner() {
   auto interval = std::chrono::milliseconds{
@@ -2117,19 +2120,14 @@ void KVEngine::CleanExpired() {
     auto bucket_iter = slot_iter.Begin();
     auto end_bucket_iter = slot_iter.End();
     auto new_ts = version_controller_.GetCurrentTimestamp();
-    std::deque<OldDeleteRecord> expired_record_queue;
     uint64_t need_clean_num = 0;
     while (bucket_iter != end_bucket_iter) {
       switch (bucket_iter->GetIndexType()) {
         case HashIndexType::StringRecord: {
-          if (bucket_iter->IsTTLStatus() &&
-              bucket_iter->GetIndex().string_record->HasExpired()) {
-            hash_table_->UpdateEntryStatus(&(*bucket_iter),
-                                           HashEntryStatus::Expired);
-            // push expired cleaner
-            expired_record_queue.push_back(
-                OldDeleteRecord{bucket_iter->GetIndex().ptr, new_ts,
-                                &(*bucket_iter), slot_iter.GetSlotLock()});
+          if (bucket_iter->IsExpiredStatus() ||
+              (bucket_iter->IsTTLStatus() &&
+               bucket_iter->GetIndex().string_record->HasExpired())) {
+            
             need_clean_num++;
           }
         }
@@ -2144,7 +2142,7 @@ void KVEngine::CleanExpired() {
       }
       bucket_iter++;
     }
-    old_records_cleaner_.PushToGloble(expired_record_queue);
+    // old_records_cleaner_.PushToGloble(expired_record_queue);
     slot_iter.Next();
   }
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(

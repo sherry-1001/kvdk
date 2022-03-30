@@ -24,17 +24,6 @@ struct OldDataRecord {
   TimeStampType release_time;
 };
 
-struct OldDeleteRecord {
-  void* pmem_delete_record;
-  // Indicate timestamp of the oldest refered snapshot of kvdk instance while we
-  // could safely clear index of this OldDeleteRecord, and transfer it to
-  // PendingFreeSpaceEntries
-  TimeStampType release_time;
-  // We need ref to hash entry for clear index of delete record
-  HashEntry* hash_entry_ref;
-  SpinMutex* hash_entry_lock;
-};
-
 struct PendingFreeSpaceEntries {
   std::vector<SpaceEntry> entries;
   // Indicate timestamp of the oldest refered snapshot of kvdk instance while we
@@ -62,20 +51,17 @@ class OldRecordsCleaner {
   }
 
   void PushToCache(const OldDataRecord& old_data_record);
-  void PushToCache(const OldDeleteRecord& old_delete_record);
-  void PushToGloble(const std::deque<OldDeleteRecord>& old_delete_records);
   // Try to clean global old records
   void TryGlobalClean();
   void TryCleanCachedOldRecords(size_t num_limit_clean);
   uint64_t NumCachedOldRecords() {
     assert(access_thread.id >= 0);
     auto& tc = cleaner_thread_cache_[access_thread.id];
-    return tc.old_delete_records.size() + tc.old_data_records.size();
+    return tc.old_data_records.size();
   }
 
  private:
   struct CleanerThreadCache {
-    std::deque<OldDeleteRecord> old_delete_records{};
     std::deque<OldDataRecord> old_data_records{};
     std::deque<PendingFreeSpaceEntry> pending_free_space_entries{};
     SpinMutex old_records_lock;
@@ -84,14 +70,12 @@ class OldRecordsCleaner {
 
   void maybeUpdateOldestSnapshot();
   SpaceEntry purgeOldDataRecord(const OldDataRecord& old_data_record);
-  SpaceEntry purgeOldDeleteRecord(const OldDeleteRecord& old_delete_record);
 
   KVEngine* kv_engine_;
 
   Array<CleanerThreadCache> cleaner_thread_cache_;
 
   std::vector<std::deque<OldDataRecord>> global_old_data_records_;
-  std::vector<std::deque<OldDeleteRecord>> global_old_delete_records_;
   std::deque<PendingFreeSpaceEntries> global_pending_free_space_entries_;
   TimeStampType clean_all_data_record_ts_{0};
 };

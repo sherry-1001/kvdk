@@ -402,7 +402,7 @@ class KVEngine : public Engine {
 
   void FreeSkiplistDramNodes();
 
-  inline void delayFree(const OldDeleteRecord&);
+  // inline void delayFree(const OldDeleteRecord&);
 
   inline void delayFree(const OldDataRecord&);
 
