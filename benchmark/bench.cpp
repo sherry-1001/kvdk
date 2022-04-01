@@ -1,18 +1,18 @@
 #include <gflags/gflags.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <string>
 #include <thread>
 
-#include "engine/alias.hpp"
 #include "generator.hpp"
 #include "kvdk/engine.hpp"
-#include "kvdk/namespace.hpp"
-#include "sys/time.h"
+#include "kvdk/types.hpp"
 
 using namespace google;
 using namespace KVDK_NAMESPACE;
@@ -30,8 +30,8 @@ DEFINE_uint64(num_operations, (1 << 30),
 
 DEFINE_bool(fill, false, "Fill num_kv uniform kv pairs to a new instance");
 
-DEFINE_uint64(timeout, 30,
-              "Time to benchmark, this is valid only if fill=false");
+DEFINE_int64(timeout, 30,
+             "Time to benchmark, this is valid only if fill=false");
 
 DEFINE_uint64(value_size, 120, "Value size of KV");
 
@@ -53,7 +53,7 @@ DEFINE_double(
 DEFINE_bool(latency, false, "Stat operation latencies");
 
 DEFINE_string(type, "string",
-              "Storage engine to benchmark, can be string, sorted, hash, queue "
+              "Storage engine to benchmark, can be string, sorted, hash, list "
               "or blackhole");
 
 DEFINE_bool(scan, false,
@@ -82,7 +82,7 @@ DEFINE_int32(max_access_threads, 32, "Max access threads of the instance");
 
 DEFINE_uint64(space, (256ULL << 30), "Max usable PMem space of the instance");
 
-DEFINE_bool(opt_large_sorted_collection_restore, false,
+DEFINE_bool(opt_large_sorted_collection_restore, true,
             " Optional optimization strategy which Multi-thread recovery a "
             "skiplist. When having few large skiplists, the optimization can "
             "get better performance");
@@ -117,20 +117,14 @@ size_t operations_per_thread;
 bool has_timed_out;
 std::vector<int> has_finished;  // std::vector<bool> is a trap!
 
-std::vector<PaddedEngine> engines;
+std::vector<PaddedEngine> random_engines;
 std::vector<PaddedRangeIterators> ranges;
 
-enum class DataType {
-  String,
-  Sorted,
-  Hashes,
-  Queue,
-  Blackhole
-} bench_data_type;
+enum class DataType { String, Sorted, Hashes, List, Blackhole } bench_data_type;
 
-enum class KeyDistribution { Range, Random, Zipf } key_dist;
+enum class KeyDistribution { Range, Uniform, Zipf } key_dist;
 
-enum class ValueSizeDistribution { Constant, Random } vsz_dist;
+enum class ValueSizeDistribution { Constant, Uniform } vsz_dist;
 
 std::uint64_t generate_key(size_t tid) {
   static std::uint64_t max_key = FLAGS_existing_keys_ratio == 0
@@ -142,11 +136,11 @@ std::uint64_t generate_key(size_t tid) {
     case KeyDistribution::Range: {
       return ranges[tid].gen();
     }
-    case KeyDistribution::Random: {
-      return uniform(engines[tid].gen);
+    case KeyDistribution::Uniform: {
+      return uniform(random_engines[tid].gen);
     }
     case KeyDistribution::Zipf: {
-      return zipf(engines[tid].gen);
+      return zipf(random_engines[tid].gen);
     }
     default: {
       throw;
@@ -159,8 +153,8 @@ size_t generate_value_size(size_t tid) {
     case ValueSizeDistribution::Constant: {
       return FLAGS_value_size;
     }
-    case ValueSizeDistribution::Random: {
-      return engines[tid].gen() % FLAGS_value_size + 1;
+    case ValueSizeDistribution::Uniform: {
+      return random_engines[tid].gen() % FLAGS_value_size + 1;
     }
     default: {
       throw;
@@ -179,6 +173,7 @@ void DBWrite(int tid) {
 
     // generate key
     std::uint64_t num = generate_key(tid);
+    std::uint64_t cid = num % FLAGS_num_collection;
     memcpy(&key[0], &num, 8);
     StringView value = StringView(value_pool.data(), generate_value_size(tid));
 
@@ -189,7 +184,7 @@ void DBWrite(int tid) {
     switch (bench_data_type) {
       case DataType::String: {
         if (FLAGS_batch_size == 0) {
-          s = engine->Set(key, value);
+          s = engine->Set(key, value, WriteOptions());
         } else {
           batch.Put(key, std::string(value.data(), value.size()));
           if (batch.Size() == FLAGS_batch_size) {
@@ -200,15 +195,16 @@ void DBWrite(int tid) {
         break;
       }
       case DataType::Sorted: {
-        s = engine->SSet(collections[num % FLAGS_num_collection], key, value);
+        s = engine->SSet(collections[cid], key, value);
         break;
       }
       case DataType::Hashes: {
-        s = engine->HSet(collections[num % FLAGS_num_collection], key, value);
+        s = engine->HSet(collections[cid], key, value);
         break;
       }
-      case DataType::Queue: {
-        s = engine->LPush(collections[num % FLAGS_num_collection], value);
+      case DataType::List: {
+        s = engine->ListPush(collections[cid], Engine::ListPosition::Left,
+                             value);
         break;
       }
       case DataType::Blackhole: {
@@ -252,13 +248,13 @@ void DBScan(int tid) {
       break;
     }
 
-    uint64_t num = generate_key(tid);
+    std::uint64_t num = generate_key(tid);
+    std::uint64_t cid = num % FLAGS_num_collection;
     memcpy(&key[0], &num, 8);
 
     switch (bench_data_type) {
       case DataType::Sorted: {
-        auto iter =
-            engine->NewSortedIterator(collections[num % FLAGS_num_collection]);
+        auto iter = engine->NewSortedIterator(collections[cid]);
         if (iter) {
           iter->Seek(key);
           for (size_t i = 0; (i < scan_length) && (iter->Valid());
@@ -278,8 +274,7 @@ void DBScan(int tid) {
         break;
       }
       case DataType::Hashes: {
-        auto iter = engine->NewUnorderedIterator(
-            collections[num % FLAGS_num_collection]);
+        auto iter = engine->NewUnorderedIterator(collections[cid]);
         if (iter) {
           for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
             key = iter->Key();
@@ -301,7 +296,7 @@ void DBScan(int tid) {
         break;
       }
       case DataType::String:
-      case DataType::Queue:
+      case DataType::List:
       default: {
         throw std::runtime_error{"Unsupported data type!"};
       }
@@ -324,6 +319,7 @@ void DBRead(int tid) {
     }
 
     std::uint64_t num = generate_key(tid);
+    std::uint64_t cid = num % FLAGS_num_collection;
     memcpy(&key[0], &num, 8);
 
     Timer timer;
@@ -336,17 +332,16 @@ void DBRead(int tid) {
         break;
       }
       case DataType::Sorted: {
-        s = engine->SGet(collections[num % FLAGS_num_collection], key,
-                         &value_sink);
+        s = engine->SGet(collections[cid], key, &value_sink);
         break;
       }
       case DataType::Hashes: {
-        s = engine->HGet(collections[num % FLAGS_num_collection], key,
-                         &value_sink);
+        s = engine->HGet(collections[cid], key, &value_sink);
         break;
       }
-      case DataType::Queue: {
-        s = engine->RPop(collections[num % FLAGS_num_collection], &value_sink);
+      case DataType::List: {
+        s = engine->ListPop(collections[cid], Engine::ListPosition::Right,
+                            &value_sink);
         break;
       }
       case DataType::Blackhole: {
@@ -393,8 +388,8 @@ void ProcessBenchmarkConfigs() {
     bench_data_type = DataType::String;
   } else if (FLAGS_type == "hash") {
     bench_data_type = DataType::Hashes;
-  } else if (FLAGS_type == "queue") {
-    bench_data_type = DataType::Queue;
+  } else if (FLAGS_type == "list") {
+    bench_data_type = DataType::List;
   } else if (FLAGS_type == "blackhole") {
     bench_data_type = DataType::Blackhole;
   } else {
@@ -406,7 +401,7 @@ void ProcessBenchmarkConfigs() {
     case DataType::Blackhole: {
       break;
     }
-    case DataType::Queue:
+    case DataType::List:
     case DataType::Hashes:
     case DataType::Sorted: {
       if (FLAGS_batch_size > 0) {
@@ -424,10 +419,10 @@ void ProcessBenchmarkConfigs() {
   // Check for scan flag
   switch (bench_data_type) {
     case DataType::String:
-    case DataType::Queue: {
+    case DataType::List: {
       if (FLAGS_scan) {
         throw std::invalid_argument{
-            R"(Scan is not supported for "String" and "Queue" type data.)"};
+            R"(Scan is not supported for "String" and "List" type data.)"};
       }
     }
     default: {
@@ -439,19 +434,19 @@ void ProcessBenchmarkConfigs() {
     throw std::invalid_argument{"value size too large"};
   }
 
-  if (FLAGS_fill || FLAGS_key_distribution == "uniform") {
+  random_engines.resize(FLAGS_threads);
+  if (FLAGS_fill) {
     assert(FLAGS_read_ratio == 0);
     key_dist = KeyDistribution::Range;
     operations_per_thread = FLAGS_num_kv / FLAGS_max_access_threads + 1;
-    for (size_t i = 0; i < FLAGS_max_access_threads; i++) {
+    for (int i = 0; i < FLAGS_max_access_threads; i++) {
       ranges.emplace_back(i * operations_per_thread,
                           (i + 1) * operations_per_thread);
     }
   } else {
     operations_per_thread = FLAGS_num_operations / FLAGS_threads;
-    engines.resize(FLAGS_threads);
     if (FLAGS_key_distribution == "random") {
-      key_dist = KeyDistribution::Random;
+      key_dist = KeyDistribution::Uniform;
     } else if (FLAGS_key_distribution == "zipf") {
       key_dist = KeyDistribution::Zipf;
     } else {
@@ -462,7 +457,7 @@ void ProcessBenchmarkConfigs() {
   if (FLAGS_value_size_distribution == "constant") {
     vsz_dist = ValueSizeDistribution::Constant;
   } else if (FLAGS_value_size_distribution == "random") {
-    vsz_dist = ValueSizeDistribution::Random;
+    vsz_dist = ValueSizeDistribution::Uniform;
   } else {
     throw std::runtime_error{"Invalid value size distribution"};
   }
@@ -477,7 +472,7 @@ int main(int argc, char** argv) {
     configs.populate_pmem_space = FLAGS_populate;
     configs.max_access_threads = FLAGS_max_access_threads;
     configs.pmem_file_size = FLAGS_space;
-    configs.opt_large_sorted_collection_restore =
+    configs.opt_large_sorted_collection_recovery =
         FLAGS_opt_large_sorted_collection_restore;
     configs.use_devdax_mode = FLAGS_use_devdax_mode;
     Status s = Engine::Open(FLAGS_path, &engine, configs, stdout);
@@ -495,7 +490,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  int write_threads =
+  size_t write_threads =
       FLAGS_fill ? FLAGS_threads
                  : FLAGS_threads - FLAGS_read_ratio * 100 * FLAGS_threads / 100;
   int read_threads = FLAGS_threads - write_threads;
@@ -505,14 +500,14 @@ int main(int argc, char** argv) {
     printf("calculate latencies\n");
     read_latencies.resize(read_threads, std::vector<std::uint64_t>(MAX_LAT, 0));
     write_latencies.resize(write_threads,
-                           std::vector<std::uint64_t>(MAX_LAT, 0));
+                           std::vector<std::uint64_t>(MAX_LAT + 1, 0));
   }
 
   if (bench_data_type == DataType::Sorted) {
     printf("Create %ld Sorted Collections\n", FLAGS_num_collection);
     for (auto col : collections) {
-      Collection* collection_ptr;
-      Status s = engine->CreateSortedCollection(col, &collection_ptr);
+      SortedCollectionConfigs s_configs;
+      Status s = engine->CreateSortedCollection(col, s_configs);
       if (s != Status::Ok) {
         throw std::runtime_error{"Fail to create Sorted collection"};
       }
@@ -525,10 +520,10 @@ int main(int argc, char** argv) {
   std::cout << "Init " << read_threads << " readers "
             << "and " << write_threads << " writers." << std::endl;
 
-  for (int i = 0; i < write_threads; i++) {
+  for (size_t i = 0; i < write_threads; i++) {
     ts.emplace_back(DBWrite, i);
   }
-  for (int i = write_threads; i < FLAGS_threads; i++) {
+  for (size_t i = write_threads; i < FLAGS_threads; i++) {
     ts.emplace_back(FLAGS_scan ? DBScan : DBRead, i);
   }
 
@@ -563,8 +558,8 @@ int main(int argc, char** argv) {
               << std::setw(field_width) << read_cnt[idx]
               << std::setw(field_width) << write_cnt[idx] << std::endl;
 
-    int num_finished =
-        std::accumulate(has_finished.begin(), has_finished.end(), 0);
+    size_t num_finished =
+        std::accumulate(has_finished.begin(), has_finished.end(), 0UL);
 
     if (num_finished == 0 || idx < 2) {
       last_effective_idx = idx;
@@ -583,7 +578,7 @@ int main(int argc, char** argv) {
   std::cout << "Benchmark finished." << std::endl;
   printf("finish bench\n");
 
-  for (int i = 0; i < FLAGS_threads; i++) {
+  for (size_t i = 0; i < FLAGS_threads; i++) {
     ts[i].join();
   }
 
@@ -656,7 +651,7 @@ int main(int argc, char** argv) {
       double l999 = 0;
       double l9999 = 0;
       for (std::uint64_t i = 1; i <= MAX_LAT; i++) {
-        for (auto j = 0; j < write_threads; j++) {
+        for (size_t j = 0; j < write_threads; j++) {
           cur += write_latencies[j][i];
           total += write_latencies[j][i] * i;
           if (l50 == 0 && (double)cur / wo > 0.5) {

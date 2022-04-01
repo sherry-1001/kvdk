@@ -9,21 +9,18 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <x86intrin.h>
 
 #include <atomic>
 #include <cassert>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <random>
 #include <string>
 #include <vector>
-
-#include "libpmemobj++/string_view.hpp"
 
 #define XXH_INLINE_ALL
 #include "xxhash.h"
@@ -31,7 +28,7 @@
 
 #include "../alias.hpp"
 #include "../macros.hpp"
-#include "kvdk/namespace.hpp"
+#include "codec.hpp"
 
 namespace KVDK_NAMESPACE {
 
@@ -52,12 +49,24 @@ Defer<F> defer_func(F f) {
 #define DEFER_3(x) DEFER_2(x, __COUNTER__)
 #define defer(code) auto DEFER_3(_defer_) = defer_func([&]() { code; })
 
+inline void atomic_memcpy_16(void* dst, void* src) {
+  ((std::atomic<__uint128_t>*)dst)
+      ->store(((std::atomic<__uint128_t>*)src)->load());
+}
+
 inline uint64_t hash_str(const char* str, uint64_t size) {
   return XXH3_64bits(str, size);
 }
 
 inline uint64_t get_checksum(const void* data, uint64_t size) {
   return XXH3_64bits(data, size);
+}
+
+inline unsigned long long get_seed() {
+  unsigned long long seed = 0;
+  while (seed == 0 && _rdseed64_step(&seed) != 1) {
+  }
+  return seed;
 }
 
 inline uint64_t fast_random_64() {
@@ -74,10 +83,18 @@ inline uint64_t fast_random_64() {
   return x * 0x2545F4914F6CDD1D;
 }
 
-inline static uint64_t rdtsc() {
+inline uint64_t rdtsc() {
   uint32_t lo, hi;
   __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
   return ((uint64_t)lo) | (((uint64_t)hi) << 32);
+}
+
+inline void atomic_load_16(void* dst, const void* src) {
+  (*(__uint128_t*)dst) = __atomic_load_16(src, std::memory_order_relaxed);
+}
+
+inline void atomic_store_16(void* dst, const void* src) {
+  __atomic_store_16(dst, (*(__uint128_t*)src), std::memory_order_relaxed);
 }
 
 inline void memcpy_16(void* dst, const void* src) {
@@ -125,12 +142,12 @@ inline int create_dir_if_missing(const std::string& name) {
   return res;
 }
 
-static inline std::string string_view_2_string(const StringView& src) {
+inline std::string string_view_2_string(const StringView& src) {
   return std::string(src.data(), src.size());
 }
 
-static inline int compare_string_view(const StringView& src,
-                                      const StringView& target) {
+inline int compare_string_view(const StringView& src,
+                               const StringView& target) {
   auto size = std::min(src.size(), target.size());
   for (uint32_t i = 0; i < size; i++) {
     if (src[i] != target[i]) {
@@ -140,8 +157,7 @@ static inline int compare_string_view(const StringView& src,
   return src.size() - target.size();
 }
 
-static inline bool equal_string_view(const StringView& src,
-                                     const StringView& target) {
+inline bool equal_string_view(const StringView& src, const StringView& target) {
   if (src.size() == target.size()) {
     return compare_string_view(src, target) == 0;
   }
@@ -173,6 +189,72 @@ class SpinMutex {
   SpinMutex(const SpinMutex& s) = delete;
   SpinMutex(SpinMutex&& s) = delete;
   SpinMutex& operator=(const SpinMutex& s) = delete;
+};
+
+class RWLock {
+  static constexpr std::int64_t reader_val{1};
+  static constexpr std::int64_t writer_val{
+      std::numeric_limits<std::int64_t>::min()};
+
+  // device.load() > 0 indicates only reader exists
+  // device.load() == 0 indicates no reader and no writer
+  // device.load() == writer_val indicates only writer exists, block readers
+  // Otherwise, writer has registered and is waiting for readers to leave
+  std::atomic_int64_t device{0};
+
+ public:
+  bool try_lock_shared() {
+    std::int64_t old = device.load();
+    if (old < 0 || !device.compare_exchange_strong(old, old + reader_val)) {
+      // Other writer has acquired lock.
+      return false;
+    }
+    return true;
+  }
+
+  void lock_shared() {
+    while (!try_lock_shared()) {
+      pause();
+    }
+    return;
+  }
+
+  void unlock_shared() {
+    device.fetch_sub(reader_val);
+    return;
+  }
+
+  bool try_lock() {
+    std::int64_t old = device.load();
+    if (old < 0 || !device.compare_exchange_strong(old, old + writer_val)) {
+      // Other writer has acquired lock.
+      return false;
+    }
+    while (device.load() != writer_val) {
+      // Block until all readers have left.
+      pause();
+    }
+    return true;
+  }
+
+  void lock() {
+    while (!try_lock()) {
+      pause();
+    }
+    return;
+  }
+
+  void unlock() {
+    device.fetch_sub(writer_val);
+    return;
+  }
+
+ private:
+  void pause() {
+    for (size_t i = 0; i < 64; i++) {
+      _mm_pause();
+    }
+  }
 };
 
 /// Caution: AlignedPoolAllocator is not thread-safe
@@ -361,31 +443,44 @@ void compare_excange_if_larger(std::atomic<T>& num, T target) {
 // Return the number of process unit (PU) that are bound to the kvdk instance
 int get_usable_pu(void);
 
-namespace CollectionUtils {
-inline static StringView ExtractUserKey(const StringView& internal_key) {
-  constexpr size_t sz_id = sizeof(CollectionIDType);
-  kvdk_assert(sz_id <= internal_key.size(),
-              "internal_key does not has space for key");
-  return StringView(internal_key.data() + sz_id, internal_key.size() - sz_id);
+namespace TimeUtils {
+/* Return the UNIX time in microseconds */
+inline UnixTimeType unix_time(void) {
+  struct timeval tv;
+  UnixTimeType ust;
+
+  gettimeofday(&tv, NULL);
+  ust = ((UnixTimeType)tv.tv_sec) * 1000000;
+  ust += tv.tv_usec;
+  return ust;
 }
 
-inline static uint64_t ExtractID(const StringView& internal_key) {
-  CollectionIDType id;
-  memcpy(&id, internal_key.data(), sizeof(CollectionIDType));
-  return id;
+inline int64_t millisecond_time() { return unix_time() / 1000; }
+
+inline bool CheckIsExpired(ExpireTimeType expired_time) {
+  if (expired_time >= 0 && expired_time <= millisecond_time()) {
+    return true;
+  }
+  return false;
 }
 
-inline static std::string ID2String(CollectionIDType id) {
-  return std::string(reinterpret_cast<char*>(&id), 8);
+inline bool CheckTTL(TTLType ttl_time, UnixTimeType base_time) {
+  if (ttl_time != kPersistTime &&
+      /* check overflow*/ ttl_time > INT64_MAX - base_time) {
+    return false;
+  }
+  return true;
 }
 
-inline static CollectionIDType string2ID(const StringView& string_id) {
-  CollectionIDType id;
-  kvdk_assert(sizeof(CollectionIDType) == string_id.size(),
-              "size of string id does not match CollectionIDType size!");
-  memcpy(&id, string_id.data(), sizeof(CollectionIDType));
-  return id;
+inline ExpireTimeType TTLToExpireTime(
+    TTLType ttl_time, UnixTimeType base_time = millisecond_time()) {
+  return ttl_time == kPersistTime ? kPersistTime : ttl_time + base_time;
 }
 
-}  // namespace CollectionUtils
+inline TTLType ExpireTimeToTTL(ExpireTimeType expire_time,
+                               UnixTimeType base_time = millisecond_time()) {
+  return expire_time == kPersistTime ? kPersistTime : expire_time - base_time;
+}
+
+}  // namespace TimeUtils
 }  // namespace KVDK_NAMESPACE

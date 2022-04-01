@@ -2,6 +2,8 @@
  * Copyright(c) 2021 Intel Corporation
  */
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <cassert>
 #include <random>
@@ -10,7 +12,6 @@
 #include <vector>
 
 #include "kvdk/engine.hpp"
-#include "kvdk/namespace.hpp"
 
 #define DEBUG  // For assert
 
@@ -31,9 +32,10 @@ static void test_anon_coll() {
   std::string value1{"value1"};
   std::string value2{"value2"};
   std::string v;
+  kvdk::WriteOptions write_options;
 
   // Insert key1-value1
-  status = engine->Set(key1, value1);
+  status = engine->Set(key1, value1, write_options);
   assert(status == kvdk::Status::Ok);
 
   // Get value1 by key1
@@ -42,7 +44,7 @@ static void test_anon_coll() {
   assert(v == value1);
 
   // Update key1-value1 to key1-value2
-  status = engine->Set(key1, value2);
+  status = engine->Set(key1, value2, write_options);
   assert(status == kvdk::Status::Ok);
 
   // Get value2 by key1
@@ -51,7 +53,7 @@ static void test_anon_coll() {
   assert(v == value2);
 
   // Insert key2-value2
-  status = engine->Set(key2, value2);
+  status = engine->Set(key2, value2, write_options);
   assert(status == kvdk::Status::Ok);
 
   // Delete key1-value2
@@ -76,12 +78,10 @@ static void test_named_coll() {
   std::string value1{"value1"};
   std::string value2{"value2"};
   std::string v;
-  kvdk::Collection* collection1_ptr;
-  kvdk::Collection* collection2_ptr;
-  status = engine->CreateSortedCollection(collection1, &collection1_ptr);
+  status = engine->CreateSortedCollection(collection1);
   assert(status == kvdk::Status::Ok);
 
-  status = engine->CreateSortedCollection(collection2, &collection2_ptr);
+  status = engine->CreateSortedCollection(collection2);
   assert(status == kvdk::Status::Ok);
   // Insert key1-value1 into "my_collection_1".
   // Implicitly create a collection named "my_collection_1" in which
@@ -133,9 +133,8 @@ static void test_named_coll() {
 
 static void test_iterator() {
   std::string sorted_collection{"my_sorted_collection"};
-  kvdk::Collection* collection_ptr;
   // Create Sorted Collection
-  status = engine->CreateSortedCollection(sorted_collection, &collection_ptr);
+  status = engine->CreateSortedCollection(sorted_collection);
   assert(status == kvdk::Status::Ok);
   // Create toy keys and values.
   std::vector<std::pair<std::string, std::string>> kv_pairs;
@@ -271,11 +270,11 @@ static void test_customer_sorted_func() {
     else
       return -1;
   };
-  engine->SetCompareFunc(comp_name, score_cmp);
+  engine->RegisterComparator(comp_name, score_cmp);
   // create sorted collection
-  kvdk::Collection* collection_ptr;
-  kvdk::Status s =
-      engine->CreateSortedCollection(collection, &collection_ptr, comp_name);
+  kvdk::SortedCollectionConfigs s_configs;
+  s_configs.comparator_name = comp_name;
+  kvdk::Status s = engine->CreateSortedCollection(collection, s_configs);
   assert(s == Ok);
   for (int i = 0; i < 5; ++i) {
     s = engine->SSet(collection, array[i].number_key, array[i].value);
@@ -287,7 +286,6 @@ static void test_customer_sorted_func() {
 
   int i = 0;
   for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
-    size_t key_len, value_len;
     std::string key = iter->Key();
     std::string value = iter->Value();
     if (key != expected_array[i].number_key) {
@@ -302,6 +300,104 @@ static void test_customer_sorted_func() {
   }
   printf("Successfully collections sorted by number.\n");
   engine->ReleaseSortedIterator(iter);
+}
+
+static void test_expire() {
+  int64_t ttl_time;
+  std::string got_val;
+  kvdk::Status s;
+  // For string
+  {
+    std::string key = "stringkey";
+    std::string val = "stringval";
+    // case: set expire time
+    s = engine->Set(key, val, kvdk::WriteOptions{100, false});
+    assert(s == kvdk::Status::Ok);
+    s = engine->Get(key, &got_val);
+    assert(s == kvdk::Status::Ok);
+    assert(got_val == val);
+    s = engine->GetTTL(key, &ttl_time);
+    assert(s == kvdk::Status::Ok);
+    // case: reset expire time
+    s = engine->Expire(key, INT32_MAX);
+    assert(s == kvdk::Status::Ok);
+    // case: change to persist key
+    s = engine->Expire(key, kvdk::kPersistTime);
+    assert(s == kvdk::Status::Ok);
+    s = engine->GetTTL(key, &ttl_time);
+    assert(s == kvdk::Status::Ok);
+    assert(ttl_time == kvdk::kPersistTime);
+    // case: key is expired.
+    s = engine->Expire(key, 1);
+    assert(s == kvdk::Status::Ok);
+    sleep(1);
+    s = engine->Get(key, &got_val);
+    assert(s == kvdk::Status::NotFound);
+    printf("Successfully expire string\n");
+  }
+
+  {
+    std::string sorted_collection = "sorted_collection";
+    std::string key = "sortedkey";
+    std::string val = "sortedval";
+
+    s = engine->CreateSortedCollection(sorted_collection);
+    // case: default persist key.
+    s = engine->GetTTL(sorted_collection, &ttl_time);
+    assert(s == kvdk::Status::Ok);
+    assert(ttl_time == kvdk::kPersistTime);
+    s = engine->SSet(sorted_collection, key, val);
+    assert(s == kvdk::Status::Ok);
+    // case: set expire_time
+    s = engine->Expire(sorted_collection, INT32_MAX);
+    assert(s == kvdk::Status::Ok);
+    // case: change to persist key
+    s = engine->Expire(sorted_collection, kvdk::kPersistTime);
+    s = engine->GetTTL(sorted_collection, &ttl_time);
+    assert(s == kvdk::Status::Ok);
+    assert(ttl_time == kvdk::kPersistTime);
+    // case: key is expired.
+    s = engine->Expire(sorted_collection, 1);
+    assert(s == kvdk::Status::Ok);
+    sleep(1);
+    s = engine->SGet(sorted_collection, key, &got_val);
+    assert(s == kvdk::Status::NotFound);
+    printf("Successfully expire sorted\n");
+  }
+
+  {
+    std::string hash_collection = "hash_collection";
+    std::string key = "hashkey";
+    std::string val = "hashval";
+
+    // case: default persist key
+    s = engine->HSet(hash_collection, key, val);
+    assert(s == kvdk::Status::Ok);
+    s = engine->GetTTL(hash_collection, &ttl_time);
+    assert(s == kvdk::Status::Ok);
+    assert(ttl_time == kvdk::kPersistTime);
+
+    // case: set expire_time
+    s = engine->Expire(hash_collection, 1);
+    assert(s == kvdk::Status::Ok);
+    // case: change to persist key
+    s = engine->Expire(hash_collection, kvdk::kPersistTime);
+    s = engine->GetTTL(hash_collection, &ttl_time);
+    assert(s == kvdk::Status::Ok);
+    assert(ttl_time == kvdk::kPersistTime);
+    // case: key is expired.
+    s = engine->Expire(hash_collection, 1);
+    assert(s == kvdk::Status::Ok);
+    sleep(1);
+    s = engine->HGet(hash_collection, key, &got_val);
+    assert(s == kvdk::Status::NotFound);
+    printf("Successfully expire hash\n");
+  }
+
+  {
+    // TODO: add expire list, but now list api has changed.
+  }
+  return;
 }
 
 int main() {
@@ -340,6 +436,9 @@ int main() {
 
   // BatchWrite on Anonymous Global Collection
   test_batch_write();
+
+  // Expire
+  test_expire();
 
   // Close KVDK instance.
   delete engine;

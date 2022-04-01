@@ -15,12 +15,10 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
-#include <libpmemobj++/string_view.hpp>
 
 #include "alias.hpp"
 #include "hash_table.hpp"
 #include "kvdk/engine.hpp"
-#include "kvdk/namespace.hpp"
 #include "macros.hpp"
 #include "structures.hpp"
 #include "utils/sync_point.hpp"
@@ -144,7 +142,6 @@ class DLinkedList {
 
   friend class UnorderedCollection;
   friend class UnorderedIterator;
-  friend class Queue;
 
   static constexpr PMemOffsetType NullPMemOffset = kNullPMemOffset;
 
@@ -194,7 +191,7 @@ class DLinkedList {
       : pmem_allocator_ptr_{pmem_allocator_p},
         head_pmmptr_{head_pmmptr},
         tail_pmmptr_{tail_pmmptr} {
-#if DEBUG_LEVEL > 0
+#if KVDK_DEBUG_LEVEL > 0
     {
       kvdk_assert(head_pmmptr->entry.meta.type == HeadType,
                   "Cannot rebuild a DlinkedList from given PMem pointer "
@@ -231,7 +228,7 @@ class DLinkedList {
         }
       }
     }
-#endif  // DEBUG_LEVEL > 0
+#endif  // KVDK_DEBUG_LEVEL > 0
   }
 
   // head_pmmptr and tail_pmmptr points to persisted Record of Head and Tail on
@@ -369,13 +366,6 @@ class DLinkedList {
 
   /// Output DlinkedList to ostream for debugging purpose.
   friend std::ostream& operator<<(std::ostream& out, DLinkedList const& dlist) {
-    auto extractKey = [](StringView internal_key) {
-      assert(sizeof(CollectionIDType) <= internal_key.size() &&
-             "internal_key does not has space for key");
-      return StringView(internal_key.data() + sizeof(CollectionIDType),
-                        internal_key.size() - sizeof(CollectionIDType));
-    };
-
     auto printRecord = [&](DLRecord* record) {
       auto internal_key = record->Key();
       out << "Type:\t" << to_hex(record->entry.meta.type) << "\t"
@@ -384,8 +374,8 @@ class DLinkedList {
           << "\t"
           << "Prev:\t" << to_hex(record->prev) << "\t"
           << "Next:\t" << to_hex(record->next) << "\t"
-          << "Key: " << to_hex(CollectionUtils::ExtractID(internal_key))
-          << CollectionUtils::ExtractUserKey(internal_key) << "\t"
+          << "Key: " << to_hex(Collection::ExtractID(internal_key))
+          << Collection::ExtractUserKey(internal_key) << "\t"
           << "Value: " << record->Value() << "\n";
     };
 

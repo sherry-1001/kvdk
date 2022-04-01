@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "kvdk/engine.h"
 
@@ -38,15 +39,18 @@ void AnonymousCollectionExample(KVDKEngine* kvdk_engine) {
   size_t value2_len = strlen(value2);
   size_t read_v1_len, read_v2_len;
   int cmp;
-  KVDKStatus s = KVDKSet(kvdk_engine, key1, key1_len, value1, value1_len);
+  KVDKWriteOptions* write_option = KVDKCreateWriteOptions();
+  KVDKStatus s =
+      KVDKSet(kvdk_engine, key1, key1_len, value1, value1_len, write_option);
   assert(s == Ok);
-  s = KVDKSet(kvdk_engine, key2, key1_len, value2, value2_len);
+  s = KVDKSet(kvdk_engine, key2, key1_len, value2, value2_len, write_option);
   assert(s == Ok);
   s = KVDKGet(kvdk_engine, key1, key1_len, &read_v1_len, &read_v1);
   assert(s == Ok);
   cmp = CmpCompare(read_v1, read_v1_len, value1, value1_len);
   assert(cmp == 0);
-  s = KVDKSet(kvdk_engine, key1, key1_len, value2, value2_len);
+  free(read_v1);
+  s = KVDKSet(kvdk_engine, key1, key1_len, value2, value2_len, write_option);
   assert(s == Ok);
   s = KVDKGet(kvdk_engine, key1, key1_len, &read_v1_len, &read_v1);
   assert(s == Ok);
@@ -54,7 +58,7 @@ void AnonymousCollectionExample(KVDKEngine* kvdk_engine) {
   assert(cmp == 0);
   s = KVDKGet(kvdk_engine, key2, key2_len, &read_v2_len, &read_v2);
   assert(s == Ok);
-  s = CmpCompare(read_v2, read_v2_len, value2, value2_len);
+  cmp = CmpCompare(read_v2, read_v2_len, value2, value2_len);
   assert(cmp == 0);
   s = KVDKDelete(kvdk_engine, key1, key1_len);
   assert(s == Ok);
@@ -80,13 +84,12 @@ void SortedCollectionExample(KVDKEngine* kvdk_engine) {
   size_t read_v1_len, read_v2_len;
   int cmp;
 
-  KVDKCollection* collecton1_ptr;
-  KVDKStatus s = KVDKCreateSortedCollection(
-      kvdk_engine, &collecton1_ptr, collection1, strlen(collection1), "", 0);
+  KVDKSortedCollectionConfigs* s_configs = KVDKCreateSortedCollectionConfigs();
+  KVDKStatus s = KVDKCreateSortedCollection(kvdk_engine, collection1,
+                                            strlen(collection1), s_configs);
   assert(s == Ok);
-  KVDKCollection* collecton2_ptr;
-  s = KVDKCreateSortedCollection(kvdk_engine, &collecton2_ptr, collection2,
-                                 strlen(collection2), "", 0);
+  s = KVDKCreateSortedCollection(kvdk_engine, collection2, strlen(collection2),
+                                 s_configs);
   assert(s == Ok);
   s = KVDKSortedSet(kvdk_engine, collection1, strlen(collection1), key1,
                     strlen(key1), value1, strlen(value1));
@@ -99,6 +102,7 @@ void SortedCollectionExample(KVDKEngine* kvdk_engine) {
   assert(s == Ok);
   cmp = CmpCompare(read_v1, read_v1_len, value1, strlen(value1));
   assert(cmp == 0);
+  free(read_v1);
   s = KVDKSortedSet(kvdk_engine, collection1, strlen(collection1), key1,
                     strlen(key1), value2, strlen(value2));
   assert(s == Ok);
@@ -120,8 +124,7 @@ void SortedCollectionExample(KVDKEngine* kvdk_engine) {
   assert(s == Ok);
   free(read_v1);
   free(read_v2);
-  KVDKDestorySortedCollection(collecton1_ptr);
-  KVDKDestorySortedCollection(collecton2_ptr);
+  KVDKDestroySortedCollectionConfigs(s_configs);
   printf(
       "Successfully performed SortedGet, SortedSet, SortedDelete "
       "operations on named "
@@ -133,10 +136,9 @@ void SortedCollectinIterExample(KVDKEngine* kvdk_engine) {
   const char* sorted_nums[10] = {"0", "1", "2", "3", "4",
                                  "5", "6", "7", "8", "9"};
   const char* sorted_collection = "sorted_collection";
-  KVDKCollection* collecton_ptr;
-  KVDKStatus s =
-      KVDKCreateSortedCollection(kvdk_engine, &collecton_ptr, sorted_collection,
-                                 strlen(sorted_collection), "", 0);
+  KVDKSortedCollectionConfigs* s_configs = KVDKCreateSortedCollectionConfigs();
+  KVDKStatus s = KVDKCreateSortedCollection(
+      kvdk_engine, sorted_collection, strlen(sorted_collection), s_configs);
   assert(s == Ok);
   for (int i = 0; i < 10; ++i) {
     char key[10] = "key", value[10] = "value";
@@ -199,10 +201,12 @@ void SortedCollectinIterExample(KVDKEngine* kvdk_engine) {
   assert(i == 0);
   printf("Successfully iterated through a sorted named collections.\n");
   KVDKDestroyIterator(kvdk_engine, kvdk_iter);
-  KVDKDestorySortedCollection(collecton_ptr);
+  KVDKDestroySortedCollectionConfigs(s_configs);
 }
 
 int score_cmp(const char* a, size_t a_len, const char* b, size_t b_len) {
+  assert(strlen(a) == a_len);
+  assert(strlen(b) == b_len);
   double scorea = atof(a);
   double scoreb = atof(b);
   if (scorea == scoreb)
@@ -230,10 +234,10 @@ void CompFuncForSortedCollectionExample(KVDKEngine* kvdk_engine) {
   const char* comp_name = "double_comp";
   KVDKRegisterCompFunc(kvdk_engine, comp_name, strlen(comp_name), score_cmp);
   // create sorted collection
-  KVDKCollection* collecton_ptr;
-  KVDKStatus s = KVDKCreateSortedCollection(kvdk_engine, &collecton_ptr,
-                                            collection, strlen(collection),
-                                            comp_name, strlen(comp_name));
+  KVDKSortedCollectionConfigs* s_configs = KVDKCreateSortedCollectionConfigs();
+  KVDKSetSortedCollectionConfigs(s_configs, comp_name, strlen(comp_name));
+  KVDKStatus s = KVDKCreateSortedCollection(kvdk_engine, collection,
+                                            strlen(collection), s_configs);
   assert(s == Ok);
   for (int i = 0; i < 5; ++i) {
     s = KVDKSortedSet(kvdk_engine, collection, strlen(collection),
@@ -243,7 +247,6 @@ void CompFuncForSortedCollectionExample(KVDKEngine* kvdk_engine) {
   }
   KVDKIterator* iter = KVDKCreateSortedIterator(kvdk_engine, collection,
                                                 strlen(collection), NULL);
-
   assert(iter != NULL);
 
   int i = 0;
@@ -265,7 +268,7 @@ void CompFuncForSortedCollectionExample(KVDKEngine* kvdk_engine) {
   }
   KVDKDestroyIterator(kvdk_engine, iter);
   printf("Successfully collections sorted by number.\n");
-  KVDKDestorySortedCollection(collecton_ptr);
+  KVDKDestroySortedCollectionConfigs(s_configs);
 }
 
 void BatchWriteAnonCollectionExample(KVDKEngine* kvdk_engine) {
@@ -324,6 +327,7 @@ void HashesCollectionExample(KVDKEngine* kvdk_engine) {
   // create sorted iterator
   KVDKIterator* kvdk_iter = KVDKCreateUnorderedIterator(
       kvdk_engine, hash_collection, strlen(hash_collection));
+  assert(kvdk_iter != NULL);
   int cnt = 0;
   for (KVDKIterSeekToFirst(kvdk_iter); KVDKIterValid(kvdk_iter);
        KVDKIterNext(kvdk_iter)) {
@@ -378,11 +382,129 @@ void ListsCollectionExample(KVDKEngine* kvdk_engine) {
   printf("Successfully performed RPush RPop LPush LPop on Lists.\n");
 }
 
+void ExpireExample(KVDKEngine* kvdk_engine) {
+  int64_t ttl_time;
+  char* got_val;
+  size_t val_len;
+  KVDKStatus s;
+  // For string
+  {
+    const char* key = "stringkey";
+    const char* val = "stringval";
+    // case: set expire time
+    KVDKWriteOptions* write_option = KVDKCreateWriteOptions();
+    KVDKWriteOptionsSetTTLTime(write_option, 100);
+    s = KVDKSet(kvdk_engine, key, strlen(key), val, strlen(val), write_option);
+    assert(s == Ok);
+    s = KVDKGet(kvdk_engine, key, strlen(key), &val_len, &got_val);
+    assert(s == Ok);
+    int cmp = CmpCompare(got_val, val_len, val, strlen(val));
+    assert(cmp == 0);
+    s = KVDKGetTTL(kvdk_engine, key, strlen(key), &ttl_time);
+    assert(s == Ok);
+    // case: reset expire time
+    s = KVDKExpire(kvdk_engine, key, strlen(key), INT32_MAX);
+    assert(s == Ok);
+    // case: change to persist key
+    s = KVDKExpire(kvdk_engine, key, strlen(key), INT64_MAX);
+    assert(s == Ok);
+    s = KVDKGetTTL(kvdk_engine, key, strlen(key), &ttl_time);
+    assert(s == Ok);
+    assert(ttl_time == INT64_MAX);
+    // case: key is expired.
+    s = KVDKExpire(kvdk_engine, key, strlen(key), 1);
+    assert(s == Ok);
+    sleep(1);
+    s = KVDKGet(kvdk_engine, key, strlen(key), &val_len, &got_val);
+    assert(s == NotFound);
+    printf("Successfully expire string\n");
+  }
+
+  {
+    const char* sorted_collection = "sorted_collection";
+    const char* key = "sortedkey";
+    const char* val = "sortedval";
+
+    // case: default persist key.
+    KVDKSortedCollectionConfigs* s_configs =
+        KVDKCreateSortedCollectionConfigs();
+    s = KVDKCreateSortedCollection(kvdk_engine, sorted_collection,
+                                   strlen(sorted_collection), s_configs);
+    s = KVDKGetTTL(kvdk_engine, sorted_collection, strlen(sorted_collection),
+                   &ttl_time);
+    assert(s == Ok);
+    assert(ttl_time == INT64_MAX);
+    s = KVDKSortedSet(kvdk_engine, sorted_collection, strlen(sorted_collection),
+                      key, strlen(key), val, strlen(val));
+    assert(s == Ok);
+    // case: set expire_time
+    s = KVDKExpire(kvdk_engine, sorted_collection, strlen(sorted_collection),
+                   INT32_MAX);
+    assert(s == Ok);
+    // case: change to persist key
+    s = KVDKExpire(kvdk_engine, sorted_collection, strlen(sorted_collection),
+                   INT64_MAX);
+    s = KVDKGetTTL(kvdk_engine, sorted_collection, strlen(sorted_collection),
+                   &ttl_time);
+    assert(s == Ok);
+    assert(ttl_time == INT64_MAX);
+    // case: key is expired.
+    s = KVDKExpire(kvdk_engine, sorted_collection, strlen(sorted_collection),
+                   1);
+    assert(s == Ok);
+    sleep(1);
+    s = KVDKSortedGet(kvdk_engine, sorted_collection, strlen(sorted_collection),
+                      key, strlen(key), &val_len, &got_val);
+    assert(s == NotFound);
+    free(got_val);
+    printf("Successfully expire sorted\n");
+  }
+
+  {
+    const char* hash_collection = "hash_collection";
+    const char* key = "hashkey";
+    const char* val = "hashval";
+
+    // case: default persist key
+    s = KVDKHashSet(kvdk_engine, hash_collection, strlen(hash_collection), key,
+                    strlen(key), val, strlen(val));
+    assert(s == Ok);
+    s = KVDKGetTTL(kvdk_engine, hash_collection, strlen(hash_collection),
+                   &ttl_time);
+    assert(s == Ok);
+    assert(ttl_time == INT64_MAX);
+
+    // case: set expire_time
+    s = KVDKExpire(kvdk_engine, hash_collection, strlen(hash_collection), 1);
+    assert(s == Ok);
+    // case: change to persist key
+    s = KVDKExpire(kvdk_engine, hash_collection, strlen(hash_collection),
+                   INT64_MAX);
+    s = KVDKGetTTL(kvdk_engine, hash_collection, strlen(hash_collection),
+                   &ttl_time);
+    assert(s == Ok);
+    assert(ttl_time == INT64_MAX);
+    // case: key is expired.
+    s = KVDKExpire(kvdk_engine, hash_collection, strlen(hash_collection), 1);
+    assert(s == Ok);
+    sleep(1);
+    s = KVDKHashGet(kvdk_engine, hash_collection, strlen(hash_collection), key,
+                    strlen(key), &val_len, &got_val);
+    assert(s == NotFound);
+    printf("Successfully expire hash\n");
+  }
+
+  {
+    // TODO: add expire list, but now list api has changed.
+  }
+  return;
+}
+
 int main() {
   // Initialize a KVDK instance.
   KVDKConfigs* kvdk_configs = KVDKCreateConfigs();
-  KVDKUserConfigs(kvdk_configs, 48, 1ull << 20, 1u, 64u, 1ull << 8, 128u,
-                  1ull << 10, 1 << 4);
+  KVDKSetConfigs(kvdk_configs, 48, 1ull << 20, 1u, 64u, 1ull << 8, 128u,
+                 1ull << 10, 1 << 4);
 
   const char* engine_path = "/mnt/pmem0/tutorial_kvdk_example";
   // Purge old KVDK instance
@@ -412,7 +534,10 @@ int main() {
   // Listes Collection Example
   ListsCollectionExample(kvdk_engine);
 
-  KVDKConfigsDestory(kvdk_configs);
+  // Expire Example
+  ExpireExample(kvdk_engine);
+
+  KVDKDestroyConfigs(kvdk_configs);
   KVDKCloseEngine(kvdk_engine);
   return 0;
 }

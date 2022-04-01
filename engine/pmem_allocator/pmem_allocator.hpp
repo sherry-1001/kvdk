@@ -11,12 +11,12 @@
 #include <set>
 #include <vector>
 
+#include "../alias.hpp"
 #include "../allocator.hpp"
 #include "../data_record.hpp"
 #include "../structures.hpp"
 #include "../version/version_controller.hpp"
 #include "free_list.hpp"
-#include "kvdk/namespace.hpp"
 
 namespace KVDK_NAMESPACE {
 
@@ -30,7 +30,7 @@ constexpr uint64_t kMinPaddingBlocks = 8;
 // maximum allocated data size should smaller than a segment.
 class PMEMAllocator : public Allocator {
  public:
-  ~PMEMAllocator();
+  virtual ~PMEMAllocator();
 
   static PMEMAllocator* NewPMEMAllocator(
       const std::string& pmem_file, uint64_t pmem_size,
@@ -89,9 +89,11 @@ class PMEMAllocator : public Allocator {
     return offset < pmem_size_ && offset != kNullPMemOffset;
   }
 
-  // Free segment_space_entry and fetch an allocated segment to
-  // segment_space_entry, until reach the end of allocated space
-  bool FreeAndFetchSegment(SpaceEntry* segment_space_entry);
+  // Try to fetch an used segment to segment_space_entry, until reach the a
+  // never used segment or end of pmem space
+  //
+  // Notice: Please only use this function in recovery
+  bool FetchSegment(SpaceEntry* segment_space_entry);
 
   // Regularly execute by background thread of KVDK
   void BackgroundWork() { free_list_.OrganizeFreeSpace(); }
@@ -145,9 +147,6 @@ class PMEMAllocator : public Allocator {
 
   static bool checkDevDaxAndGetSize(const char* path, uint64_t* size);
 
-  // Mark and persist a space entry on PMem
-  void persistSpaceEntry(PMemOffsetType offset, uint64_t size);
-
   // Populate PMem space so the following access can be faster
   // Warning! this will zero the entire PMem space
   void populateSpace();
@@ -167,14 +166,17 @@ class PMEMAllocator : public Allocator {
     return data_size / block_size_ + (data_size % block_size_ == 0 ? 0 : 1);
   }
 
-  // Protect PMem offset head
-  SpinMutex offset_head_lock_;
-  uint64_t offset_head_;
+  // Mark and persist a space entry on PMem
+  void persistSpaceEntry(PMemOffsetType offset, uint64_t size);
+
+  char* pmem_;
   std::vector<PAllocThreadCache, AlignedAllocator<PAllocThreadCache>>
       palloc_thread_cache_;
   const uint32_t block_size_;
   const uint64_t segment_size_;
-  char* pmem_;
+  // Protect PMem offset head
+  SpinMutex offset_head_lock_;
+  uint64_t offset_head_;
   uint64_t pmem_size_;
   Freelist free_list_;
   // For quickly get corresponding block size of a requested data size

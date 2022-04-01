@@ -4,19 +4,18 @@
 
 #include "dram_allocator.hpp"
 
-#include "kvdk/namespace.hpp"
 #include "thread_manager.hpp"
 
 namespace KVDK_NAMESPACE {
 
-void ChunkBasedAllocator::Free(const SpaceEntry& entry) {
+void ChunkBasedAllocator::Free(const SpaceEntry&) {
   // Not supported yet
 }
 
 SpaceEntry ChunkBasedAllocator::Allocate(uint64_t size) {
   SpaceEntry entry;
   if (size > chunk_size_) {
-    void* addr = malloc(size);
+    void* addr = aligned_alloc(64, size);
     if (addr != nullptr) {
       entry.size = chunk_size_;
       entry.offset = addr2offset(addr);
@@ -26,7 +25,7 @@ SpaceEntry ChunkBasedAllocator::Allocate(uint64_t size) {
   }
 
   if (dalloc_thread_cache_[access_thread.id].usable_bytes < size) {
-    void* addr = malloc(chunk_size_);
+    void* addr = aligned_alloc(64, chunk_size_);
     if (addr == nullptr) {
       return entry;
     }

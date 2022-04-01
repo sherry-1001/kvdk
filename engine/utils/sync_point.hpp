@@ -10,9 +10,8 @@
 
 #pragma once
 
-#include <assert.h>
-
 #include <atomic>
+#include <cassert>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -24,7 +23,7 @@
 
 #include "sync_impl.hpp"
 
-#if DEBUG_LEVEL > 0
+#if KVDK_DEBUG_LEVEL > 0
 
 namespace KVDK_NAMESPACE {
 

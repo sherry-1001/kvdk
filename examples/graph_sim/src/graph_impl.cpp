@@ -12,7 +12,7 @@ void EdgeList::EdgesListEncode(std::string* result) {
   // string will be expand space frequently.
   result->reserve(Num() * edges[0].Size() + 8);
   PutFixed64(result, Num());
-  for (int i = 0; i < Num(); i++) {
+  for (size_t i = 0; i < Num(); i++) {
     edges[i].EncodeTo(result);
   }
 }
@@ -23,7 +23,7 @@ Status EdgeList::EdgeListDecode(std::string* input) {
 
   // We have the edge's DecodeFrom, so it's easy to decode the edge
   // from the encoded edgelist.
-  for (int i = 0; i < edges_num; i++) {
+  for (size_t i = 0; i < edges_num; i++) {
     Edge edge;
     auto s = edge.DecodeFrom(input);
     if (s != Status::Ok) {
@@ -203,7 +203,7 @@ Status GraphSimulator::RemoveVertex(const Vertex& vertex) {
 }
 
 Status GraphSimulator::RemoveEdge(const Edge& edge) {
-  assert(edge.out_direction <= 2 && edge.out_direction >= 0);
+  assert(edge.out_direction <= 2);
   return RemoveInternalEdge(edge);
 }
 
@@ -329,7 +329,7 @@ Status GraphSimulator::GetTopN(
     edge_list.EdgeListDecode(&value);
     top_n.Push(std::make_pair(vertex, edge_list.Num()));
   }
-
+  delete iter;
   if (top_n.Size() == 0) {
     return Status::Abort;
   }
@@ -372,7 +372,7 @@ Status GraphSimulator::BFSInternal(const Vertex& vertex, const int& n_depth) {
       }
 
       // add the current vertex's breadth elements into queue
-      for (int i = 0; i < edge_list.Num() && search_depth <= n_depth; i++) {
+      for (size_t i = 0; i < edge_list.Num() && search_depth <= n_depth; i++) {
         Vertex v = edge_list.edges[i].src;
         if (visited[v]) {
           continue;

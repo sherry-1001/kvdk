@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  * Copyright(c) 2021 Intel Corporation
  */
+#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <deque>
 #include <functional>
@@ -14,9 +16,7 @@
 
 #include "../engine/alias.hpp"
 #include "../engine/kv_engine.hpp"
-#include "gtest/gtest.h"
 #include "kvdk/engine.hpp"
-#include "kvdk/namespace.hpp"
 #include "test_util.h"
 
 using kvdk::StringView;
@@ -283,7 +283,6 @@ class ShadowKVEngine {
     {
       std::cout << "[Testing] Checking by Get" << std::endl;
       ProgressBar pbar{std::cout, "", possible_state.size(), 1000, true};
-      size_t progress = 0;
       while (!possible_state_copy.empty()) {
         auto key = possible_state_copy.begin()->first;
 
@@ -395,7 +394,8 @@ class EngineTestBase : public testing::Test {
   kvdk::Configs configs;
   kvdk::Status status;
 
-  const std::string path_db{"/mnt/pmem0/kvdk_test_extensive"};
+  const std::string path_db{"/mnt/pmem0/kvdk_stress_test_" +
+                            std::to_string(__rdtsc())};
 
   /// The following parameters are used to configure the test.
   /// Override SetUpParameters to provide different parameters
@@ -719,8 +719,7 @@ TEST_F(EngineStressTest, SortedSetsSSetOnly) {
   std::string global_collection_name{"SortedCollection"};
   InitializeSorted(global_collection_name);
 
-  kvdk::Collection* dummy;
-  ASSERT_EQ(engine->CreateSortedCollection(global_collection_name, &dummy),
+  ASSERT_EQ(engine->CreateSortedCollection(global_collection_name),
             kvdk::Status::Ok);
 
   std::cout << "[Testing] Modify, check, reboot and check engine for "
@@ -740,8 +739,7 @@ TEST_F(EngineStressTest, SortedSetsSSetAndSDelete) {
   std::string global_collection_name{"SortedCollection"};
   InitializeSorted(global_collection_name);
 
-  kvdk::Collection* dummy;
-  ASSERT_EQ(engine->CreateSortedCollection(global_collection_name, &dummy),
+  ASSERT_EQ(engine->CreateSortedCollection(global_collection_name),
             kvdk::Status::Ok);
 
   std::cout << "[Testing] Modify, check, reboot and check engine for "
@@ -844,8 +842,7 @@ TEST_F(EngineHotspotTest, SortedSetsMultipleHotspot) {
   std::string global_collection_name{"SortedCollection"};
   InitializeSorted(global_collection_name);
 
-  kvdk::Collection* dummy;
-  ASSERT_EQ(engine->CreateSortedCollection(global_collection_name, &dummy),
+  ASSERT_EQ(engine->CreateSortedCollection(global_collection_name),
             kvdk::Status::Ok);
 
   std::cout << "[Testing] Modify, check, reboot and check engine for "

@@ -19,14 +19,16 @@
 #include <unordered_map>
 #include <vector>
 
+#include "alias.hpp"
 #include "data_record.hpp"
 #include "dram_allocator.hpp"
 #include "hash_table.hpp"
 #include "kvdk/engine.hpp"
 #include "logger.hpp"
 #include "pmem_allocator/pmem_allocator.hpp"
-#include "queue.hpp"
-#include "skiplist.hpp"
+#include "simple_list.hpp"
+#include "sorted_collection/rebuilder.hpp"
+#include "sorted_collection/skiplist.hpp"
 #include "structures.hpp"
 #include "thread_manager.hpp"
 #include "unordered_collection.hpp"
@@ -60,11 +62,29 @@ class KVEngine : public Engine {
   }
   void ReportPMemUsage();
 
+  // Expire str after ttl_time
+  //
+  // Notice:
+  // 1. Expire assumes that str is not duplicated among all types, which is not
+  // implemented yet
+  // 2. Expire is not compatible with checkpoint for now
+  Status Expire(const StringView str, TTLType ttl_time) override;
+  // Get time to expire of str
+  //
+  // Notice:
+  // Expire assumes that str is not duplicated among all types, which is not
+  // implemented yet
+  Status GetTTL(const StringView str, TTLType* ttl_time) override;
+
   // Global Anonymous Collection
   Status Get(const StringView key, std::string* value) override;
-  Status Set(const StringView key, const StringView value) override;
+  Status Set(const StringView key, const StringView value,
+             const WriteOptions& write_options) override;
   Status Delete(const StringView key) override;
   Status BatchWrite(const WriteBatch& write_batch) override;
+  virtual Status Modify(const StringView key, std::string* new_value,
+                        ModifyFunction modify_func,
+                        const WriteOptions& options) override;
 
   // Sorted Collection
   Status SGet(const StringView collection, const StringView user_key,
@@ -87,32 +107,17 @@ class KVEngine : public Engine {
   std::shared_ptr<Iterator> NewUnorderedIterator(
       StringView const collection_name) override;
 
-  // Queue
-  virtual Status LPop(StringView const collection_name,
-                      std::string* value) override {
-    return xPop(collection_name, value, QueueOpPosition::Left);
-  }
-
-  virtual Status RPop(StringView const collection_name,
-                      std::string* value) override {
-    return xPop(collection_name, value, QueueOpPosition::Right);
-  }
-
-  virtual Status LPush(StringView const collection_name,
-                       StringView const value) override {
-    return xPush(collection_name, value, QueueOpPosition::Left);
-  }
-
-  virtual Status RPush(StringView const collection_name,
-                       StringView const value) override {
-    return xPush(collection_name, value, QueueOpPosition::Right);
-  }
-
   void ReleaseAccessThread() override { access_thread.Release(); }
 
-  const std::vector<std::shared_ptr<Skiplist>>& GetSkiplists() {
+  const std::unordered_map<CollectionIDType, std::shared_ptr<Skiplist>>&
+  GetSkiplists() {
     return skiplists_;
   };
+
+  // Used by test case.
+  const std::shared_ptr<HashTable>& GetHashTable() { return hash_table_; }
+
+  void CleanOutDated();
 
  private:
   friend OldRecordsCleaner;
@@ -120,7 +125,8 @@ class KVEngine : public Engine {
   KVEngine(const Configs& configs)
       : engine_thread_cache_(configs.max_access_threads),
         version_controller_(configs.max_access_threads),
-        old_records_cleaner_(this, configs.max_access_threads){};
+        old_records_cleaner_(this, configs.max_access_threads),
+        comparators_(configs.comparator){};
 
   struct BatchWriteHint {
     TimeStampType timestamp{0};
@@ -155,60 +161,195 @@ class KVEngine : public Engine {
   Status HashGetImpl(const StringView& key, std::string* value,
                      uint16_t type_mask);
 
-  inline Status MaybeInitAccessThread();
-
-  void SetCompareFunc(
-      const StringView& collection_name,
-      std::function<int(const StringView& src, const StringView& target)>
-          comp_func) {
-    comparator_.SetComparaFunc(collection_name, comp_func);
+  inline Status MaybeInitAccessThread() {
+    return thread_manager_->MaybeInitThread(access_thread);
   }
 
-  Status CreateSortedCollection(const StringView collection_name,
-                                Collection** collection_ptr,
-                                const StringView& comp_name) override;
+  bool RegisterComparator(const StringView& collection_name,
+                          Comparator comp_func) {
+    return comparators_.RegisterComparator(collection_name, comp_func);
+  }
+
+  Status CreateSortedCollection(
+      const StringView collection_name,
+      const SortedCollectionConfigs& configs) override;
+
+  // List
+  Status ListLock(StringView key) final;
+  Status ListTryLock(StringView key) final;
+  Status ListUnlock(StringView key) final;
+  Status ListLength(StringView key, size_t* sz) final;
+  Status ListPos(StringView key, StringView elem, std::vector<size_t>* indices,
+                 IndexType rank = 1, size_t count = 1,
+                 size_t max_len = 0) final;
+  Status ListPos(StringView key, StringView elem, size_t* index,
+                 IndexType rank = 1, size_t max_len = 0) final;
+  Status ListRange(StringView key, IndexType start, IndexType stop,
+                   GetterCallBack cb, void* cb_args) final;
+  Status ListIndex(StringView key, IndexType index, GetterCallBack cb,
+                   void* cb_args) final;
+  Status ListIndex(StringView key, IndexType index, std::string* elem) final;
+  Status ListPush(StringView key, ListPosition pos, StringView elem) final;
+  Status ListPop(StringView key, ListPosition pos, GetterCallBack cb,
+                 void* cb_args, size_t cnt = 1) final;
+  Status ListPop(StringView key, ListPosition pos, std::string* elem) final;
+  Status ListInsert(StringView key, ListPosition pos, IndexType pivot,
+                    StringView elem) final;
+  Status ListInsert(StringView key, ListPosition pos, StringView pivot,
+                    StringView elem, IndexType rank = 1) final;
+  Status ListRemove(StringView key, IndexType cnt, StringView elem) final;
+  Status ListSet(StringView key, IndexType index, StringView elem) final;
 
  private:
-  Status InitCollection(const StringView& collection, Collection** list,
-                        uint16_t collection_type);
+  struct LookupResult {
+    Status s{Status::NotSupported};
+    HashEntry entry{};
+    HashEntry* entry_ptr{nullptr};
+  };
+
+  // Look up the key,
+  // return Status::NotFound is key is not found or has expired.
+  // return Status::WrongType if type_mask does not match.
+  // return Status::Ok otherwise.
+  LookupResult lookupKey(StringView key, uint16_t type_mask);
+
   std::shared_ptr<UnorderedCollection> createUnorderedCollection(
       StringView const collection_name);
-  std::unique_ptr<Queue> createQueue(StringView const collection_name);
 
+  template <typename CollectionType>
+  static constexpr RecordType collectionType() {
+    static_assert(std::is_same<CollectionType, UnorderedCollection>::value ||
+                      std::is_same<CollectionType, Skiplist>::value ||
+                      std::is_same<CollectionType, List>::value ||
+                      std::is_same<CollectionType, StringRecord>::value,
+                  "Invalid type!");
+    return std::is_same<CollectionType, UnorderedCollection>::value
+               ? RecordType::DlistRecord
+               : std::is_same<CollectionType, Skiplist>::value
+                     ? RecordType::SortedHeaderRecord
+                     : std::is_same<CollectionType, List>::value
+                           ? RecordType::ListRecord
+                           : RecordType::Empty;
+  }
+
+  static PointerType pointerType(RecordType rtype) {
+    switch (rtype) {
+      case RecordType::Empty: {
+        return PointerType::Empty;
+      }
+      case RecordType::StringDataRecord:
+      case RecordType::StringDeleteRecord: {
+        return PointerType::StringRecord;
+      }
+      case RecordType::SortedDataRecord:
+      case RecordType::SortedDeleteRecord: {
+        kvdk_assert(false, "Not supported!");
+        return PointerType::Invalid;
+      }
+      case RecordType::SortedHeaderRecord: {
+        return PointerType::Skiplist;
+      }
+      case RecordType::DlistDataRecord: {
+        return PointerType::UnorderedCollectionElement;
+      }
+      case RecordType::DlistRecord: {
+        return PointerType::UnorderedCollection;
+      }
+      case RecordType::ListRecord: {
+        return PointerType::List;
+      }
+      case RecordType::DlistHeadRecord:
+      case RecordType::ListElem:
+      default: {
+        /// TODO: Remove Expire Flag
+        kvdk_assert(false, "Invalid type!");
+        return PointerType::Invalid;
+      }
+    }
+  }
+
+  // May lock HashTable internally, caller must call this without lock
+  // HashTable!
+  //
+  // TODO (jiayu): replace this with lookupKey
   template <typename CollectionType>
   Status FindCollection(const StringView collection_name,
                         CollectionType** collection_ptr, uint64_t record_type) {
-    HashTable::KeyHashHint hint = hash_table_->GetHint(collection_name);
-    HashEntry hash_entry;
-    HashEntry* entry_ptr = nullptr;
-    Status s = hash_table_->SearchForRead(hint, collection_name, record_type,
-                                          &entry_ptr, &hash_entry, nullptr);
-
-    *collection_ptr = nullptr;
-    if (s != Status::Ok) {
-      return s;
+    LookupResult res = lookupKey(collection_name, record_type);
+    if (res.s == Status::Expired) {
+      // TODO(zhichen): will open the following code when completing collection
+      // deletion.
+      // delayFree(OldDeleteRecord{res.entry_ptr->GetIndex().ptr,
+      //                           version_controller_.GetCurrentTimestamp(),
+      //                           res.entry_ptr, hint.spin});
+      return Status::NotFound;
     }
-    *collection_ptr = (CollectionType*)hash_entry.index.ptr;
-    return s;
+    *collection_ptr =
+        res.s == Status::Ok
+            ? static_cast<CollectionType*>(res.entry_ptr->GetIndex().ptr)
+            : nullptr;
+    return res.s;
   }
 
   enum class QueueOpPosition { Left, Right };
   Status xPush(StringView const collection_name, StringView const value,
                QueueOpPosition push_pos);
 
-  Status xPop(StringView const collection_name, std::string* value,
-              QueueOpPosition pop_pos);
+  // Lockless. It's up to caller to lock the HashTable
+  template <typename CollectionType>
+  Status registerCollection(CollectionType* coll) {
+    RecordType type = collectionType<CollectionType>();
+    HashTable::KeyHashHint hint = hash_table_->GetHint(coll->Name());
+    HashEntry hash_entry;
+    HashEntry* entry_ptr = nullptr;
+    Status s =
+        hash_table_->SearchForWrite(hint, coll->Name(), PrimaryRecordType,
+                                    &entry_ptr, &hash_entry, nullptr);
+    if (s != Status::NotFound) {
+      if (hash_entry.GetRecordType() != type) {
+        return Status::WrongType;
+      }
+      kvdk_assert(false, "Collection already registered!");
+      return Status::Abort;
+    }
+
+    PointerType ptype = pointerType(type);
+    kvdk_assert(ptype != PointerType::Invalid, "Invalid pointer type!");
+    hash_table_->Insert(hint, entry_ptr, type, coll, ptype);
+    return Status::Ok;
+  }
+
+  struct RemoveResult {
+    Status s{Status::NotSupported};
+    HashEntry entry{};
+  };
+
+  // Lockless, caller should lock the key aforehand.
+  // Remove key from HashTable. It's up to caller to handle the erased key
+  RemoveResult removeKey(const StringView key) {
+    RemoveResult result;
+    HashTable::KeyHashHint hint = hash_table_->GetHint(key);
+    HashEntry* entry_ptr = nullptr;
+    result.s = hash_table_->SearchForWrite(hint, key, PrimaryRecordType,
+                                           &entry_ptr, &result.entry, nullptr);
+    if (result.s != Status::Ok) {
+      return result;
+    }
+    hash_table_->Erase(entry_ptr);
+    return result;
+  }
 
   Status MaybeInitPendingBatchFile();
 
-  Status StringSetImpl(const StringView& key, const StringView& value);
+  Status StringSetImpl(const StringView& key, const StringView& value,
+                       const WriteOptions& write_options);
 
   Status StringDeleteImpl(const StringView& key);
 
   Status StringBatchWriteImpl(const WriteBatch::KV& kv,
                               BatchWriteHint& batch_hint);
 
-  Status SSetImpl(Skiplist* skiplist, const StringView& user_key,
+  Status SSetImpl(Skiplist* skiplist, const StringView& collection_key,
                   const StringView& value);
 
   Status SDeleteImpl(Skiplist* skiplist, const StringView& user_key);
@@ -217,14 +358,12 @@ class KVEngine : public Engine {
 
   Status RestoreData();
 
-  Status RestoreSkiplistHead(DLRecord* pmem_record,
-                             const DataEntry& cached_entry);
+  Status RestoreSkiplistHeader(DLRecord* pmem_record);
 
   Status RestoreStringRecord(StringRecord* pmem_record,
                              const DataEntry& cached_entry);
 
-  Status RestoreSkiplistRecord(DLRecord* pmem_record,
-                               const DataEntry& cached_data_entry);
+  Status RestoreSkiplistRecord(DLRecord* pmem_record);
 
   // Check if a doubly linked record has been successfully inserted, and try
   // repair un-finished prev pointer
@@ -245,7 +384,20 @@ class KVEngine : public Engine {
 
   Status RestoreDlistRecords(DLRecord* pmp_record);
 
-  Status RestoreQueueRecords(DLRecord* pmp_record);
+  List* listCreate(StringView key);
+
+  // Find and lock the list. Initialize non-existing if required.
+  // Guarantees always return a valid List and lockes it if returns Status::Ok
+  Status listFind(StringView key, List** list, bool init_nx,
+                  std::unique_lock<std::recursive_mutex>& guard);
+
+  Status listRestoreElem(DLRecord* pmp_record);
+
+  Status listRestoreList(DLRecord* pmp_record);
+
+  Status listRegisterRecovered();
+
+  Status listDestroy(List* list);
 
   Status CheckConfigs(const Configs& configs);
 
@@ -336,13 +488,6 @@ class KVEngine : public Engine {
                    data_entry->header.record_size));
   }
 
-  inline void markEmptySpace(const SpaceEntry& space_entry) {
-    DataHeader header(0, space_entry.size);
-    pmem_memcpy_persist(
-        pmem_allocator_->offset2addr_checked(space_entry.offset), &header,
-        sizeof(DataHeader));
-  }
-
   // Run in background to clean old records regularly
   void backgroundOldRecordCleaner();
 
@@ -369,10 +514,13 @@ class KVEngine : public Engine {
 
   std::shared_ptr<HashTable> hash_table_;
 
-  std::vector<std::shared_ptr<Skiplist>> skiplists_;
+  std::unordered_map<CollectionIDType, std::shared_ptr<Skiplist>> skiplists_;
   std::vector<std::shared_ptr<UnorderedCollection>>
       vec_sp_unordered_collections_;
-  std::vector<std::unique_ptr<Queue>> queue_uptr_vec_;
+
+  std::vector<std::unique_ptr<List>> lists_;
+  std::unique_ptr<ListBuilder> list_builder_;
+
   std::mutex list_mu_;
 
   std::string dir_;
@@ -387,15 +535,14 @@ class KVEngine : public Engine {
   VersionController version_controller_;
   OldRecordsCleaner old_records_cleaner_;
 
-  bool bg_cleaner_processing_;
+  bool need_clean_records_ = false;
 
-  Comparator comparator_;
+  ComparatorTable comparators_;
 
   struct BackgroundWorkSignals {
     BackgroundWorkSignals() = default;
     BackgroundWorkSignals(const BackgroundWorkSignals&) = delete;
 
-    std::condition_variable_any old_records_cleaner_cv;
     std::condition_variable_any pmem_usage_reporter_cv;
     std::condition_variable_any pmem_allocator_organizer_cv;
     std::condition_variable_any dram_cleaner_cv;

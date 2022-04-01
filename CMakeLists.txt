@@ -19,8 +19,8 @@ if (CMAKE_BUILD_TYPE STREQUAL "Release")
 elseif (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
 elseif (CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
 elseif (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer")
 elseif (CMAKE_BUILD_TYPE STREQUAL "FastDebug")
     set(CMAKE_CXX_FLAGS "-g -O2 -march=native")
     set(CMAKE_C_FLAGS "-g -O2 -march=native")
@@ -29,10 +29,10 @@ else ()
 endif ()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Release")
-    add_compile_definitions(DEBUG_LEVEL=0)
+    add_compile_definitions(KVDK_DEBUG_LEVEL=0)
 else ()
-    add_compile_definitions(DEBUG_CHECK)
-    add_compile_definitions(DEBUG_LEVEL=1)
+    add_compile_definitions(KVDK_DEBUG_CHECK)
+    add_compile_definitions(KVDK_DEBUG_LEVEL=1)
 endif ()
 
 # code coverage
@@ -52,7 +52,8 @@ set(SOURCES
         engine/kv_engine.cpp
         engine/logger.cpp
         engine/hash_table.cpp
-        engine/skiplist.cpp
+        engine/sorted_collection/skiplist.cpp
+        engine/sorted_collection/rebuilder.cpp
         engine/write_batch.cpp
         engine/dram_allocator.cpp
         engine/pmem_allocator/pmem_allocator.cpp
@@ -61,21 +62,19 @@ set(SOURCES
         engine/c.cpp
         engine/unordered_collection.cpp
         engine/data_record.cpp
-        engine/queue.cpp
         engine/version/old_records_cleaner.cpp
         )
 
 # .a library
 add_library(engine SHARED ${SOURCES})
 target_include_directories(engine PUBLIC ./include ./extern)
-target_link_libraries(engine PUBLIC pthread pmem gflags hwloc)
+target_link_libraries(engine PUBLIC pthread pmem gflags hwloc atomic)
 
 configure_file(kvdk.pc.in kvdk.pc @ONLY)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/kvdk.pc
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
 set(KVDK_PUBLIC_HEADERS
-    ${PROJECT_SOURCE_DIR}/include/kvdk/collection.hpp
     ${PROJECT_SOURCE_DIR}/include/kvdk/comparator.hpp
     ${PROJECT_SOURCE_DIR}/include/kvdk/configs.hpp
     ${PROJECT_SOURCE_DIR}/include/kvdk/engine.h

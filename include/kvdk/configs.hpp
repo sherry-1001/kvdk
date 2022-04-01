@@ -6,7 +6,8 @@
 
 #include <string>
 
-#include "namespace.hpp"
+#include "comparator.hpp"
+#include "types.hpp"
 
 namespace KVDK_NAMESPACE {
 
@@ -15,10 +16,19 @@ enum class LogLevel : uint8_t {
   Debug,
   Info,
   Error,
+  None,
 };
 
 // A snapshot indicates a immutable view of a KVDK engine at a certain time
 struct Snapshot {};
+
+// Configs of created sorted collection
+// For correctness of encoding, please add new config field in the end of the
+// existing fields
+struct SortedCollectionConfigs {
+  std::string comparator_name = "default";
+  int index_with_hashtable = 1;
+};
 
 struct Configs {
   // Max number of access threads to read/write data to kvdk instance.
@@ -43,7 +53,7 @@ struct Configs {
 
   // The minimum allocation unit of PMem space
   //
-  // It should align to 8 bytes.
+  // It should minimum align to 16 bytes.
   uint32_t pmem_block_size = 64;
 
   // The number of blocks in a PMem segment
@@ -115,7 +125,7 @@ struct Configs {
   // Optional optimization strategy for few large skiplists by multi-thread
   // recovery a skiplist. The optimization can get better performance when
   // having few large skiplists. Default is to close optimization.
-  bool opt_large_sorted_collection_restore = false;
+  bool opt_large_sorted_collection_recovery = false;
 
   // If a checkpoint is made in last open, recover the instance to the
   // checkpoint version if this true
@@ -123,6 +133,20 @@ struct Configs {
   // Notice: If opening a backup instance, this will always be set to true
   // during recovery.
   bool recover_to_checkpoint = false;
+
+  // If customer compare functions is used in a kvdk engine, these functions
+  // should be registered to the comparator before open engine
+  ComparatorTable comparator;
+};
+
+struct WriteOptions {
+  WriteOptions() {}
+  WriteOptions(int64_t _ttl_time, bool _key_exist)
+      : ttl_time(_ttl_time), key_exist(_key_exist) {}
+  // expired time in milliseconod, should be kPersistTime for no expiration
+  // data, or >= 0 as the ttl
+  int64_t ttl_time = kPersistTTL;
+  bool key_exist = false;
 };
 
 }  // namespace KVDK_NAMESPACE
