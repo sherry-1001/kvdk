@@ -25,7 +25,6 @@ elseif (CMAKE_BUILD_TYPE STREQUAL "FastDebug")
     set(CMAKE_CXX_FLAGS "-g -O2 -march=native")
     set(CMAKE_C_FLAGS "-g -O2 -march=native")
 else ()
-    message(FATAL_ERROR "Invalid build type!")
 endif ()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Release")
