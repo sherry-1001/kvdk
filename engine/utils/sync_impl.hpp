@@ -8,7 +8,7 @@
  * Copyright(c) 2021 Intel Corporation
  */
 
-#pragma one
+#pragma once
 
 #include <assert.h>
 
@@ -22,9 +22,9 @@
 #include <unordered_set>
 #include <vector>
 
-#include "kvdk/namespace.hpp"
+#include "../alias.hpp"
 
-#if DEBUG_LEVEL > 0
+#if KVDK_DEBUG_LEVEL > 0
 namespace KVDK_NAMESPACE {
 
 struct SyncPointPair {

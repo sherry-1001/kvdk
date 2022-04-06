@@ -231,11 +231,7 @@ Status HashTable::SearchForRead(const KeyHashHint& hint, const StringView& key,
 
 void HashTable::Insert(
     const KeyHashHint& hint, HashEntry* entry_ptr, RecordType type, void* index,
-<<<<<<< HEAD
-    HashIndexType index_type,
-=======
     PointerType index_type,
->>>>>>> origin/main
     HashEntryStatus entry_status /*= HashEntryStatus::Persist*/) {
   HashEntry new_hash_entry(hint.key_hash_value >> 32, type, index, index_type,
                            entry_status);

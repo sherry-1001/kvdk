@@ -13,11 +13,13 @@
 #include "kvdk/iterator.hpp"
 #include "kvdk/status.h"
 #include "kvdk/write_batch.hpp"
+
 using kvdk::StringView;
 
 using kvdk::Configs;
 using kvdk::Engine;
 using kvdk::Iterator;
+using kvdk::ListIterator;
 using kvdk::Snapshot;
 using kvdk::SortedCollectionConfigs;
 using kvdk::WriteBatch;
@@ -27,19 +29,27 @@ extern "C" {
 struct KVDKConfigs {
   Configs rep;
 };
+
 struct KVDKEngine {
-  Engine* rep;
+  std::unique_ptr<Engine> rep;
 };
+
 struct KVDKWriteBatch {
   WriteBatch rep;
 };
 struct KVDKIterator {
-  KVDKIterType type;
+  KVDKIteratorType type;
   Iterator* rep;
 };
+
+struct KVDKListIterator {
+  std::unique_ptr<ListIterator> rep;
+};
+
 struct KVDKSnapshot {
   Snapshot* rep;
 };
+
 struct KVDKWriteOptions {
   WriteOptions rep;
 };
@@ -49,8 +59,8 @@ struct KVDKSortedCollectionConfigs {
 };
 
 static char* CopyStringToChar(const std::string& str) {
-  char* result = reinterpret_cast<char*>(malloc(sizeof(char) * str.size()));
-  memcpy(result, str.data(), sizeof(char) * str.size());
+  char* result = static_cast<char*>(malloc(str.size()));
+  memcpy(result, str.data(), str.size());
   return result;
 }
 
@@ -109,11 +119,11 @@ KVDKStatus KVDKOpen(const char* name, const KVDKConfigs* config, FILE* log_file,
   KVDKStatus s =
       Engine::Open(std::string(name), &engine, config->rep, log_file);
   if (s != KVDKStatus::Ok) {
-    kv_engine = nullptr;
+    *kv_engine = nullptr;
     return s;
   }
   *kv_engine = new KVDKEngine;
-  (*kv_engine)->rep = engine;
+  (*kv_engine)->rep.reset(engine);
   return s;
 }
 
@@ -132,10 +142,7 @@ void KVDKReleaseSnapshot(KVDKEngine* engine, KVDKSnapshot* snapshot) {
   delete snapshot;
 }
 
-void KVDKCloseEngine(KVDKEngine* engine) {
-  delete engine->rep;
-  delete engine;
-}
+void KVDKCloseEngine(KVDKEngine* engine) { delete engine; }
 
 void KVDKRemovePMemContents(const char* name) {
   std::string res = "rm -rf " + std::string(name) + "\n";
@@ -207,19 +214,21 @@ KVDKStatus KVDKSet(KVDKEngine* engine, const char* key, size_t key_len,
 }
 
 KVDKStatus KVDKModify(KVDKEngine* engine, const char* key, size_t key_len,
-                      char* new_value, size_t* new_value_len,
-                      void (*modify)(const char*, size_t, char*, size_t*),
+                      char** new_value, size_t* new_value_len,
+                      ModifyFunc modify, void* modify_args,
                       const KVDKWriteOptions* write_option) {
-  auto modify_func = [&](StringView value) {
-    modify(value.data(), value.size(), new_value, new_value_len);
-    return std::string(new_value, *new_value_len);
+  auto modify_func = [&](StringView value, void* args) {
+    modify(value.data(), value.size(), new_value, new_value_len, modify_args);
+    std::string result(*new_value, *new_value_len);
+    return result;
   };
   std::string modify_result;
-  KVDKStatus s = engine->rep->Modify(StringView(key, key_len), &modify_result,
-                                     modify_func, write_option->rep);
+  KVDKStatus s =
+      engine->rep->Modify(StringView(key, key_len), &modify_result, modify_func,
+                          modify_args, write_option->rep);
   assert(s != KVDKStatus::Ok ||
          (modify_result.size() == *new_value_len &&
-          memcmp(modify_result.data(), new_value, modify_result.size()) == 0));
+          memcmp(modify_result.data(), *new_value, modify_result.size()) == 0));
   return s;
 }
 
@@ -288,61 +297,18 @@ KVDKStatus KVDKHashGet(KVDKEngine* engine, const char* collection,
   return s;
 }
 
-KVDKStatus KVDKLPush(KVDKEngine* engine, const char* collection,
-                     size_t collection_len, const char* key, size_t key_len) {
-  return engine->rep->ListPush(StringView(collection, collection_len),
-                               Engine::ListPosition::Left,
-                               StringView(key, key_len));
-}
-
-KVDKStatus KVDKRPush(KVDKEngine* engine, const char* collection,
-                     size_t collection_len, const char* key, size_t key_len) {
-  return engine->rep->ListPush(StringView(collection, collection_len),
-                               Engine::ListPosition::Right,
-                               StringView(key, key_len));
-}
-
-KVDKStatus KVDKLPop(KVDKEngine* engine, const char* collection,
-                    size_t collection_len, char** key, size_t* key_len) {
-  std::string str;
-  *key = nullptr;
-  KVDKStatus s = engine->rep->ListPop(StringView(collection, collection_len),
-                                      Engine::ListPosition::Left, &str);
-  if (s != KVDKStatus::Ok) {
-    *key_len = 0;
-    return s;
-  }
-  *key_len = str.size();
-  *key = CopyStringToChar(str);
-  return s;
-}
-
-KVDKStatus KVDKRPop(KVDKEngine* engine, const char* collection,
-                    size_t collection_len, char** key, size_t* key_len) {
-  std::string str;
-  *key = nullptr;
-  KVDKStatus s = engine->rep->ListPop(StringView(collection, collection_len),
-                                      Engine::ListPosition::Right, &str);
-  if (s != KVDKStatus::Ok) {
-    *key_len = 0;
-    return s;
-  }
-  *key_len = str.size();
-  *key = CopyStringToChar(str);
-  return s;
-}
-
 KVDKIterator* KVDKCreateUnorderedIterator(KVDKEngine* engine,
                                           const char* collection,
                                           size_t collection_len) {
   KVDKIterator* result = new KVDKIterator;
-  result->rep =
-      (engine->rep->NewUnorderedIterator(std::string(collection))).get();
+  result->rep = (engine->rep->NewUnorderedIterator(
+                     StringView{collection, collection_len}))
+                    .release();
   if (!result->rep) {
     delete result;
     return nullptr;
   }
-  result->type = HASH;
+  result->type = KVDKIteratorType::HashIterator;
   return result;
 }
 
@@ -351,28 +317,31 @@ KVDKIterator* KVDKCreateSortedIterator(KVDKEngine* engine,
                                        size_t collection_len,
                                        KVDKSnapshot* snapshot) {
   KVDKIterator* result = new KVDKIterator;
-  result->rep = (engine->rep->NewSortedIterator(
-      std::string(collection), snapshot ? snapshot->rep : nullptr));
+  result->rep =
+      (engine->rep->NewSortedIterator(StringView{collection, collection_len},
+                                      snapshot ? snapshot->rep : nullptr));
   if (!result->rep) {
     delete result;
     return nullptr;
   }
-  result->type = SORTED;
+  result->type = KVDKIteratorType::SortedIterator;
   return result;
 }
 
 void KVDKDestroyIterator(KVDKEngine* engine, KVDKIterator* iterator) {
-  switch (iterator->type) {
-    case SORTED: {
-      engine->rep->ReleaseSortedIterator(iterator->rep);
-      break;
+  if (iterator != nullptr) {
+    switch (iterator->type) {
+      case KVDKIteratorType::SortedIterator: {
+        engine->rep->ReleaseSortedIterator(iterator->rep);
+        break;
+      }
+      case KVDKIteratorType::HashIterator: {
+        delete iterator->rep;
+        break;
+      }
+      default:
+        std::abort();
     }
-    case HASH: {
-      break;
-    }
-
-    default:
-      std::abort();
   }
   delete iterator;
 }
@@ -389,15 +358,15 @@ unsigned char KVDKIterValid(KVDKIterator* iter) { return iter->rep->Valid(); }
 
 void KVDKIterNext(KVDKIterator* iter) { iter->rep->Next(); }
 
-void KVDKIterPre(KVDKIterator* iter) { iter->rep->Prev(); }
+void KVDKIterPrev(KVDKIterator* iter) { iter->rep->Prev(); }
 
-const char* KVDKIterKey(KVDKIterator* iter, size_t* key_len) {
+char* KVDKIterKey(KVDKIterator* iter, size_t* key_len) {
   std::string key_str = iter->rep->Key();
   *key_len = key_str.size();
   return CopyStringToChar(key_str);
 }
 
-const char* KVDKIterValue(KVDKIterator* iter, size_t* val_len) {
+char* KVDKIterValue(KVDKIterator* iter, size_t* val_len) {
   std::string val_str = iter->rep->Value();
   *val_len = val_str.size();
   return CopyStringToChar(val_str);
@@ -411,5 +380,118 @@ KVDKStatus KVDKExpire(KVDKEngine* engine, const char* str, size_t str_len,
 KVDKStatus KVDKGetTTL(KVDKEngine* engine, const char* str, size_t str_len,
                       int64_t* ttl_time) {
   return engine->rep->GetTTL(std::string(str, str_len), ttl_time);
+}
+}
+
+// List
+extern "C" {
+KVDKStatus KVDKListLength(KVDKEngine* engine, char const* key_data,
+                          size_t key_len, size_t* sz) {
+  return engine->rep->ListLength(StringView{key_data, key_len}, sz);
+}
+
+KVDKStatus KVDKListPushFront(KVDKEngine* engine, char const* key_data,
+                             size_t key_len, char const* elem_data,
+                             size_t elem_len) {
+  return engine->rep->ListPushFront(StringView{key_data, key_len},
+                                    StringView{elem_data, elem_len});
+}
+
+KVDKStatus KVDKListPushBack(KVDKEngine* engine, char const* key_data,
+                            size_t key_len, char const* elem_data,
+                            size_t elem_len) {
+  return engine->rep->ListPushBack(StringView{key_data, key_len},
+                                   StringView{elem_data, elem_len});
+}
+
+KVDKStatus KVDKListPopFront(KVDKEngine* engine, char const* key_data,
+                            size_t key_len, char** elem_data,
+                            size_t* elem_len) {
+  *elem_data = nullptr;
+  *elem_len = 0;
+  std::string buffer;
+  KVDKStatus s =
+      engine->rep->ListPopFront(StringView{key_data, key_len}, &buffer);
+  if (s == KVDKStatus::Ok) {
+    *elem_data = CopyStringToChar(buffer);
+    *elem_len = buffer.size();
+  }
+  return s;
+}
+
+KVDKStatus KVDKListPopBack(KVDKEngine* engine, char const* key_data,
+                           size_t key_len, char** elem_data, size_t* elem_len) {
+  *elem_data = nullptr;
+  *elem_len = 0;
+  std::string buffer;
+  KVDKStatus s =
+      engine->rep->ListPopBack(StringView{key_data, key_len}, &buffer);
+  if (s == KVDKStatus::Ok) {
+    *elem_data = CopyStringToChar(buffer);
+    *elem_len = buffer.size();
+  }
+  return s;
+}
+
+KVDKStatus KVDKListInsert(KVDKEngine* engine, KVDKListIterator* pos,
+                          char const* elem_data, size_t elem_len) {
+  return engine->rep->ListInsert(pos->rep, StringView{elem_data, elem_len});
+}
+
+KVDKStatus KVDKListErase(KVDKEngine* engine, KVDKListIterator* pos) {
+  return engine->rep->ListErase(pos->rep);
+}
+
+KVDKStatus KVDKListSet(KVDKEngine* engine, KVDKListIterator* pos,
+                       char const* elem_data, size_t elem_len) {
+  return engine->rep->ListSet(pos->rep, StringView{elem_data, elem_len});
+}
+
+KVDKListIterator* KVDKListIteratorCreate(KVDKEngine* engine,
+                                         char const* key_data, size_t key_len) {
+  auto rep = engine->rep->ListMakeIterator(StringView{key_data, key_len});
+  if (rep == nullptr) {
+    return nullptr;
+  }
+  KVDKListIterator* iter = new KVDKListIterator;
+  iter->rep.swap(rep);
+  return iter;
+}
+
+void KVDKListIteratorDestroy(KVDKListIterator* iter) { delete iter; }
+
+void KVDKListIteratorPrev(KVDKListIterator* iter) { iter->rep->Prev(); }
+
+void KVDKListIteratorNext(KVDKListIterator* iter) { iter->rep->Next(); }
+
+void KVDKListIteratorSeekToFirst(KVDKListIterator* iter) {
+  iter->rep->SeekToFirst();
+}
+
+void KVDKListIteratorSeekToLast(KVDKListIterator* iter) {
+  iter->rep->SeekToLast();
+}
+
+void KVDKListIteratorSeekPos(KVDKListIterator* iter, long pos) {
+  iter->rep->Seek(pos);
+}
+
+void KVDKListIteratorSeekElem(KVDKListIterator* iter, char const* elem_data,
+                              size_t elem_len) {
+  iter->rep->Seek(StringView{elem_data, elem_len});
+}
+
+int KVDKListIteratorIsValid(KVDKListIterator* iter) {
+  bool valid = iter->rep->Valid();
+  return (valid ? 1 : 0);
+}
+
+void KVDKListIteratorGetValue(KVDKListIterator* iter, char** elem_data,
+                              size_t* elem_len) {
+  *elem_data = nullptr;
+  *elem_len = 0;
+  std::string buffer = iter->rep->Value();
+  *elem_data = CopyStringToChar(buffer);
+  *elem_len = buffer.size();
 }
 }
