@@ -941,7 +941,8 @@ Status KVEngine::SDeleteImpl(Skiplist* skiplist, const StringView& user_key) {
           } else {
             // delete record nor pointed by hash entry nor skiplist node
             // delayFree(OldDeleteRecord(ret.write_record, nullptr,
-            //                           PointerType::Empty, new_ts, hint.spin));
+            //                           PointerType::Empty, new_ts,
+            //                           hint.spin));
           }
         }
         return ret.s;
@@ -1202,11 +1203,10 @@ Status KVEngine::BatchWrite(const WriteBatch& write_batch) {
       delayFree(OldDataRecord{batch_hints[i].data_record_to_free, ts});
     }
     if (batch_hints[i].delete_record_to_free != nullptr) {
-      hash_table_->UpdateEntryStatus(batch_hints[i].hash_entry_ptr,
-                                     HashEntryStatus::Expired);
-      // delayFree(OldDeleteRecord{batch_hints[i].delete_record_to_free, ts,
-      //                           batch_hints[i].hash_entry_ptr,
-      //                           batch_hints[i].hash_hint.spin});
+      // delayFree(OldDeleteRecord(
+      //     batch_hints[i].delete_record_to_free,
+      //     batch_hints[i].hash_entry_ptr,
+      // PointerType::HashEntry, ts, batch_hints[i].hash_hint.spin));
     }
     if (batch_hints[i].space_not_used) {
       pmem_allocator_->Free(batch_hints[i].allocated_space);
@@ -1241,9 +1241,8 @@ Status KVEngine::Modify(const StringView key, std::string* new_value,
   if (ret.s == Status::Expired && ret.entry_ptr->IsTTLStatus()) {
     hash_table_->UpdateEntryStatus(ret.entry_ptr, HashEntryStatus::Expired);
     // ul.unlock();
-    // delayFree(OldDeleteRecord{ret.entry.GetIndex().ptr, new_ts,
-    // ret.entry_ptr,
-    //                           hint.spin});
+    // delayFree(OldDeleteRecord{ret.entry.GetIndex().ptr, ret.entry_ptr,
+    //                           PointerType::HashEntry, new_ts, hint.spin});
     return Status::NotFound;
   }
   if (ret.s == Status::Ok) {
@@ -1416,7 +1415,7 @@ Status KVEngine::Expire(const StringView str, TTLType ttl_time) {
     // deletion.
     if (res.entry_ptr->GetIndexType() == PointerType::StringRecord) {
       hash_table_->UpdateEntryStatus(res.entry_ptr, HashEntryStatus::Expired);
-      ul.unlock();
+      // ul.unlock();
       // delayFree(OldDeleteRecord{
       //     res.entry_ptr->GetIndex().ptr, res.entry_ptr,
       //     PointerType::HashEntry, version_controller_.GetCurrentTimestamp(),
