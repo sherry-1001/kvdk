@@ -4,6 +4,8 @@
 
 #include "old_records_cleaner.hpp"
 
+#include <future>
+
 #include "../kv_engine.hpp"
 #include "../sorted_collection/skiplist.hpp"
 
@@ -42,13 +44,193 @@ void OldRecordsCleaner::PushToGlobal(
 }
 
 void OldRecordsCleaner::TryGlobalClean() {
+  // Update recorded oldest snapshot up to state so we can know which records
+  // can be freed
+  kv_engine_->version_controller_.UpdatedOldestSnapshot();
+  TimeStampType oldest_snapshot_ts =
+      kv_engine_->version_controller_.OldestSnapshotTS();
+
+  std::atomic<int64_t> purged_num{0};
+
+  // Fetch thread cached old records
+  // Notice: As we can purge old delete records only after the older data
+  // records are purged for recovery, so we must fetch cached old delete records
+  // before cached old data records, and purge old data records before purge old
+  // delete records here
+  for (size_t i = 0; i < cleaner_thread_cache_.size(); i++) {
+    auto& cleaner_thread_cache = cleaner_thread_cache_[i];
+    // As clean delete record is costly, we prefer to amortize the overhead to
+    // TryCleanCachedOldRecords(), otherwise this procedure will cost a longn
+    // time. Only if there is to delete records waiting to be cleaned in a
+    // thread cache, then we help to clean them here
+    if (cleaner_thread_cache.old_delete_records.size() >
+        kLimitCachedDeleteRecords) {
+      std::lock_guard<SpinMutex> lg(cleaner_thread_cache.old_records_lock);
+      global_old_delete_records_.emplace_back();
+      global_old_delete_records_.back().swap(
+          cleaner_thread_cache.old_delete_records);
+      break;
+    }
+  }
+
+  for (size_t i = 0; i < cleaner_thread_cache_.size(); i++) {
+    auto& cleaner_thread_cache = cleaner_thread_cache_[i];
+    if (cleaner_thread_cache.old_data_records.size() > 0) {
+      std::lock_guard<SpinMutex> lg(cleaner_thread_cache.old_records_lock);
+      global_old_data_records_.emplace_back();
+      global_old_data_records_.back().swap(
+          cleaner_thread_cache.old_data_records);
+    }
+  }
+
+  int num_thread = 4;
+  std::vector<std::vector<SpaceEntry>> space_to_free(num_thread);
+  std::vector<PendingFreeSpaceEntries> space_pending(num_thread);
+  // records that can't be freed this time
+  std::vector<std::deque<OldDataRecord>> data_record_refered(num_thread);
+  std::vector<std::deque<OldDeleteRecord>> delete_record_refered(num_thread);
+
+  size_t stride_data = global_old_data_records_.size() / num_thread == 0
+                           ? global_old_data_records_.size()
+                           : global_old_data_records_.size() / num_thread;
+  size_t stride_delete = global_old_delete_records_.size() / num_thread == 0
+                             ? global_old_delete_records_.size()
+                             : global_old_delete_records_.size() / num_thread;
+
+  // auto start_now = std::chrono::system_clock::now();
+  auto start_now = TimeUtils::millisecond_time();
+  auto thread_purge = [&](size_t start_idx) {
+    // Find free-able data records
+    size_t end_idx = std::min((start_idx + 1) * stride_data,
+                              global_old_data_records_.size());
+    for (size_t i = start_idx * stride_data; i < end_idx; ++i) {
+      for (auto& record : global_old_data_records_[i]) {
+        if (record.release_time <= oldest_snapshot_ts) {
+          // purged_num++;
+          space_to_free[start_idx].emplace_back(purgeOldDataRecord(record));
+        } else {
+          data_record_refered[start_idx].emplace_back(record);
+        }
+      }
+    }
+
+    clean_all_data_record_ts_ = oldest_snapshot_ts;
+
+    // Find purge-able delete records
+    // To avoid access invalid data, an old delete record can be freed only
+    // if no holding snapshot is older than its purging time
+    size_t delete_end_idx = std::min((start_idx + 1) * stride_delete,
+                                     global_old_delete_records_.size());
+
+    for (size_t i = start_idx * stride_delete; i < delete_end_idx; ++i) {
+      for (auto& record : global_old_delete_records_[i]) {
+        if (record.release_time <= clean_all_data_record_ts_) {
+          // purged_num++;
+          space_pending[start_idx].entries.emplace_back(
+              purgeOldDeleteRecord(record));
+        } else {
+          delete_record_refered[start_idx].emplace_back(record);
+        }
+      }
+    }
+
+    // if (space_pending[start_idx].entries.size() > 0) {
+    //   space_pending[start_idx].release_time =
+    //       kv_engine_->version_controller_.GetCurrentTimestamp();
+    //   global_pending_free_space_entries_[start_idx].emplace_back(
+    //       space_pending[start_idx]);
+    // }
+
+    // auto iter = global_pending_free_space_entries_[start_idx].begin();
+    // while (iter != global_pending_free_space_entries_[start_idx].end()) {
+    //   if (iter->release_time < oldest_snapshot_ts) {
+    //     kv_engine_->pmem_allocator_->BatchFree(iter->entries);
+    //     iter++;
+    //   } else {
+    //     break;
+    //   }
+    // }
+    // global_pending_free_space_entries_[start_idx].erase(
+    //     global_pending_free_space_entries_[start_idx].begin(), iter);
+
+    if (space_to_free[start_idx].size() > 0) {
+      kv_engine_->pmem_allocator_->BatchFree(space_to_free[start_idx]);
+    }
+  };
+
+  std::vector<std::future<void>> fs;
+  for (size_t i = 0; i < num_thread; ++i) {
+    fs.push_back(std::async(thread_purge, i));
+  }
+  for (auto& f : fs) {
+    f.get();
+  }
+
+  // auto during = std::chrono::duration_cast<std::chrono::seconds>(
+  //                   std::chrono::system_clock::now() - start_now)
+  //                   .count();
+  // auto during = (TimeUtils::millisecond_time() - start_now) / 1000;
+  // if (during > 0) {
+  //   printf("total purged num: %ld, time: %ld s, ops: %ld\n",
+  //   purged_num.load(),
+  //          during, purged_num.load() / during);
+  // }
+
+  auto release_time = kv_engine_->version_controller_.GetCurrentTimestamp();
+  for (auto space : space_pending) {
+    if (space.entries.size() > 0) {
+      space.release_time = release_time;
+      global_pending_free_space_entries_.emplace_back(space);
+    }
+  }
+
+  // auto iter = global_pending_free_space_entries_.begin();
+  // while (iter != global_pending_free_space_entries_.end()){
+  //   iter++;
+  // }
+
+  auto iter = global_pending_free_space_entries_.begin();
+  while (iter != global_pending_free_space_entries_.end()) {
+    if (iter->release_time < oldest_snapshot_ts) {
+      printf("%ld\n", iter->entries.size());
+      // kv_engine_->pmem_allocator_->BatchFree(iter->entries);
+      iter++;
+    } else {
+      break;
+    }
+  }
+  global_pending_free_space_entries_.erase(
+      global_pending_free_space_entries_.begin(), iter);
+
+  for (auto space : space_to_free) {
+    if (space.size() > 0) {
+      kv_engine_->pmem_allocator_->BatchFree(space);
+    }
+  }
+
+  global_old_data_records_.clear();
+  for (auto data_record : data_record_refered) {
+    if (data_record.size() > 0) {
+      global_old_data_records_.emplace_back(data_record);
+    }
+  }
+
+  global_old_delete_records_.clear();
+  for (auto delete_record : delete_record_refered) {
+    if (delete_record.size() > 0) {
+      global_old_delete_records_.emplace_back(delete_record);
+    }
+  }
+}
+
+/* void OldRecordsCleaner::TryGlobalClean() {
   std::vector<SpaceEntry> space_to_free;
   // records that can't be freed this time
   std::deque<OldDataRecord> data_record_refered;
   std::deque<OldDeleteRecord> delete_record_refered;
   PendingFreeSpaceEntries space_pending;
-  // Update recorded oldest snapshot up to state so we can know which records
-  // can be freed
+  // Update recorded oldest snapshot up to state so we can know which
+  // records can be freed
   kv_engine_->version_controller_.UpdatedOldestSnapshot();
   TimeStampType oldest_snapshot_ts =
       kv_engine_->version_controller_.OldestSnapshotTS();
@@ -84,10 +266,13 @@ void OldRecordsCleaner::TryGlobalClean() {
     }
   }
 
+  int64_t purged_num = 0;
+  auto start_now = std::chrono::system_clock::now();
   // Find free-able data records
   for (auto& data_records : global_old_data_records_) {
     for (auto& record : data_records) {
       if (record.release_time <= oldest_snapshot_ts) {
+        purged_num++;
         space_to_free.emplace_back(purgeOldDataRecord(record));
       } else {
         data_record_refered.emplace_back(record);
@@ -103,12 +288,27 @@ void OldRecordsCleaner::TryGlobalClean() {
   for (auto& delete_records : global_old_delete_records_) {
     for (auto& record : delete_records) {
       if (record.release_time <= clean_all_data_record_ts_) {
+        purged_num++;
         space_pending.entries.emplace_back(purgeOldDeleteRecord(record));
       } else {
         delete_record_refered.emplace_back(record);
       }
     }
   }
+
+  auto during = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now() - start_now)
+                    .count();
+  // printf("free %ld ms\n", during);
+  if (during > 0) {
+    printf("total purged num: %ld, time: %ld s, ops: %ld\n", purged_num, during,
+           purged_num / during);
+  }
+  // auto during = std::chrono::duration_cast<std::chrono::milliseconds>(
+  //                   std::chrono::system_clock::now() - start_now)
+  //                   .count();
+
+  // start_now = std::chrono::system_clock::now();
 
   if (space_pending.entries.size() > 0) {
     space_pending.release_time =
@@ -136,7 +336,7 @@ void OldRecordsCleaner::TryGlobalClean() {
   global_old_data_records_.emplace_back(data_record_refered);
   global_old_delete_records_.clear();
   global_old_delete_records_.emplace_back(delete_record_refered);
-}
+}*/
 
 void OldRecordsCleaner::TryCleanCachedOldRecords(size_t num_limit_clean) {
   kvdk_assert(access_thread.id >= 0,
@@ -152,8 +352,8 @@ void OldRecordsCleaner::TryCleanCachedOldRecords(size_t num_limit_clean) {
              clean_all_data_record_ts_ &&
          limit > 0;
          limit--) {
-      // To avoid access invalid data, an old delete record can be freed only if
-      // no holding snapshot is older than its purging time
+      // To avoid access invalid data, an old delete record can be freed
+      // only if no holding snapshot is older than its purging time
       tc.pending_free_space_entries.emplace_back(PendingFreeSpaceEntry{
           purgeOldDeleteRecord(tc.old_delete_records.front()),
           kv_engine_->version_controller_.GetCurrentTimestamp()});
@@ -223,22 +423,24 @@ SpaceEntry OldRecordsCleaner::purgeOldDeleteRecord(
       [[gnu::fallthrough]];
     }
     case StringDeleteRecord: {
-      kvdk_assert(
-          old_delete_record.record_index.hash_entry.RawPointer() != nullptr &&
-              old_delete_record.key_lock != nullptr &&
-              old_delete_record.record_index.hash_entry.GetTag() ==
-                  PointerType::HashEntry,
-          "hash index not stored in old delete record of string");
+      // kvdk_assert(
+      //     old_delete_record.record_index.hash_entry.RawPointer() != nullptr
+      //     &&
+      //         old_delete_record.key_lock != nullptr &&
+      //         old_delete_record.record_index.hash_entry.GetTag() ==
+      //             PointerType::HashEntry,
+      //     "hash index not stored in old delete record of string");
       HashEntry* hash_entry_ptr = static_cast<HashEntry*>(
           old_delete_record.record_index.hash_entry.RawPointer());
-      if (hash_entry_ptr->GetIndex().string_record ==
-          old_delete_record.pmem_delete_record) {
-        std::lock_guard<SpinMutex> lg(*old_delete_record.key_lock);
-        if (hash_entry_ptr->GetIndex().string_record ==
-            old_delete_record.pmem_delete_record) {
-          kv_engine_->hash_table_->Erase(hash_entry_ptr);
-        }
-      }
+      // if (hash_entry_ptr->GetIndex().string_record ==
+      //     old_delete_record.pmem_delete_record) {
+      //   // std::lock_guard<SpinMutex> lg(*old_delete_record.key_lock);
+      //   if (hash_entry_ptr->GetIndex().string_record ==
+      //       old_delete_record.pmem_delete_record) {
+      //     kv_engine_->hash_table_->Erase(hash_entry_ptr);
+      //   }
+      // }
+      kv_engine_->hash_table_->Erase(hash_entry_ptr);
       // we don't need to purge a delete record
       return SpaceEntry(kv_engine_->pmem_allocator_->addr2offset(data_entry),
                         data_entry->header.record_size);
@@ -287,11 +489,12 @@ SpaceEntry OldRecordsCleaner::purgeOldDeleteRecord(
           break;
         }
         case PointerType::Empty: {
-          // This record is not indexed by hash table and skiplist node, so we
-          // check linkage to determine if its already been purged
+          // This record is not indexed by hash table and skiplist node, so
+          // we check linkage to determine if its already been purged
           //
           // We only check the next linkage, as the delete record is already
-          // been locked, its next linkage will not be changed by other threads.
+          // been locked, its next linkage will not be changed by other
+          // threads.
           if (Skiplist::CheckReocrdNextLinkage(
                   static_cast<DLRecord*>(old_delete_record.pmem_delete_record),
                   kv_engine_->pmem_allocator_.get())) {
@@ -325,5 +528,4 @@ SpaceEntry OldRecordsCleaner::purgeOldDeleteRecord(
     }
   }
 }
-
 }  // namespace KVDK_NAMESPACE

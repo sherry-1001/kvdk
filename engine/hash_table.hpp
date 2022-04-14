@@ -67,10 +67,15 @@ struct alignas(16) HashEntry {
 
   RecordType GetRecordType() const { return header_.record_type; }
 
+  TimeStampType GetTimeStamp() const {
+    return static_cast<DataEntry*>(index_.ptr)->meta.timestamp;
+  }
+
   bool IsExpiredStatus() {
     return header_.entry_status == HashEntryStatus::Expired;
   }
 
+  HashEntryStatus GetHashEntryStatus() { return header_.entry_status; }
   bool IsTTLStatus() { return header_.entry_status == HashEntryStatus::TTL; }
 
   // Check if "key" of data type "target_type" is indexed by "this". If
@@ -177,7 +182,11 @@ class HashTable {
 
   SlotIterator GetSlotIterator();
 
- private:
+  HashEntry* HashTableIter(char* bucket_ptr, uint64_t entry_idx) {
+    return (HashEntry*)(bucket_ptr) + entry_idx;
+  }
+  //  private:
+ public:
   HashTable(uint64_t hash_bucket_num, uint32_t hash_bucket_size,
             uint32_t num_buckets_per_slot,
             std::shared_ptr<PMEMAllocator> pmem_allocator,
@@ -206,9 +215,9 @@ class HashTable {
   ChunkBasedAllocator dram_allocator_;
   std::shared_ptr<PMEMAllocator> pmem_allocator_;
   const uint64_t num_entries_per_bucket_;
-  Array<Slot> slots_;
   std::vector<uint64_t> hash_bucket_entries_;
   void* main_buckets_;
+  Array<Slot> slots_;
 };
 
 struct SlotIterator {
@@ -226,9 +235,9 @@ struct SlotIterator {
 
   void GetBucketRangeAndLockSlot() {
     // release prev slot lock.
-    iter_lock_slot_ = std::unique_lock<SpinMutex>(
-        hash_table_->slots_[current_slot_id].spin, std::defer_lock);
-    iter_lock_slot_.lock();
+    // iter_lock_slot_ = std::unique_lock<SpinMutex>(
+    //     hash_table_->slots_[current_slot_id].spin, std::defer_lock);
+    // iter_lock_slot_.lock();
     iter_start_bucket_idx_ =
         current_slot_id * hash_table_->num_buckets_per_slot_;
     iter_end_bucket_idx_ =
@@ -290,7 +299,7 @@ struct SlotIterator {
       }
       bucket_ptr_ = reinterpret_cast<char*>(hash_table->main_buckets_) +
                     bucket_idx_ * hash_table->hash_bucket_size_;
-      _mm_prefetch(bucket_ptr_, _MM_HINT_T0);
+      // _mm_prefetch(bucket_ptr_, _MM_HINT_T0);
     }
 
     void Next() {
@@ -301,7 +310,7 @@ struct SlotIterator {
             entry_idx_ % hash_table->num_entries_per_bucket_ == 0) {
           memcpy_8(&bucket_ptr_,
                    bucket_ptr_ + hash_table->hash_bucket_size_ - 8);
-          _mm_prefetch(bucket_ptr_, _MM_HINT_T0);
+          // _mm_prefetch(bucket_ptr_, _MM_HINT_T0);
         }
       }
       if (entry_idx_ == hash_table->hash_bucket_entries_[bucket_idx_]) {
@@ -331,7 +340,10 @@ struct SlotIterator {
 
   BucketIterator End() { return BucketIterator{this, iter_end_bucket_idx_}; }
 
-  SpinMutex* GetSlotLock() { return iter_lock_slot_.mutex(); }
+  SpinMutex* GetSlotLock() {
+    // return iter_lock_slot_.mutex();
+    return &hash_table_->slots_[current_slot_id].spin;
+  }
 };
 
 }  // namespace KVDK_NAMESPACE

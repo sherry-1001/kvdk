@@ -76,7 +76,9 @@ struct PendingFreeSpaceEntry {
 class OldRecordsCleaner {
  public:
   OldRecordsCleaner(KVEngine* kv_engine, uint32_t max_access_threads)
-      : kv_engine_(kv_engine), cleaner_thread_cache_(max_access_threads) {
+      : kv_engine_(kv_engine),
+        cleaner_thread_cache_(max_access_threads){
+    // ,global_pending_free_space_entries_(32)
     assert(kv_engine_ != nullptr);
   }
 
@@ -111,8 +113,18 @@ class OldRecordsCleaner {
 
   std::vector<std::deque<OldDataRecord>> global_old_data_records_;
   std::vector<std::deque<OldDeleteRecord>> global_old_delete_records_;
+  std::vector<std::deque<OldDeleteRecord>> global_old_delete_records_2;
   std::deque<PendingFreeSpaceEntries> global_pending_free_space_entries_;
+  // std::vector<std::deque<PendingFreeSpaceEntries>>
+  //     global_pending_free_space_entries_;
   TimeStampType clean_all_data_record_ts_{0};
+
+  // struct MultiThreadCleaner {
+  //   std::vector<std::deque<OldDataRecord>> global_old_data_records_;
+  //   std::vector<std::deque<OldDeleteRecord>> global_old_delete_records_;
+  //   std::deque<PendingFreeSpaceEntries> global_pending_free_space_entries_;
+  // };
+  // Array<MultiThreadCleaner> global_thread_cleaner;
 };
 
 }  // namespace KVDK_NAMESPACE
