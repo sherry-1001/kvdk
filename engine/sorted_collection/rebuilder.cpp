@@ -219,6 +219,7 @@ Status SortedCollectionRebuilder::initRebuildLists() {
           addRecoverySegment(skiplist->HeaderNode());
         }
 
+        valid_version_record->PersistOldVersion(kNullPMemOffset);
         // Always build hash index for skiplist
         s = insertHashIndex(skiplist->Name(), skiplist.get(),
                             PointerType::Skiplist);
@@ -363,6 +364,8 @@ Status SortedCollectionRebuilder::rebuildSegmentIndex(SkiplistNode* start_node,
           addUnlinkedRecord(next_record);
         }
         num_elems++;
+
+        valid_version_record->PersistOldVersion(kNullPMemOffset);
 
         assert(valid_version_record != nullptr);
         SkiplistNode* dram_node = Skiplist::NewNodeBuild(valid_version_record);
@@ -545,6 +548,8 @@ Status SortedCollectionRebuilder::rebuildSkiplistIndex(Skiplist* skiplist) {
           return s;
         }
       }
+
+      valid_version_record->PersistOldVersion(kNullPMemOffset);
 
       splice.prev_pmem_record = valid_version_record;
     }
