@@ -7,7 +7,6 @@ pmem_path = "/mnt/pmem{}/kvdk_benchmark".format(numanode)
 bin = "../build/bench"
 exec = "numactl --cpunodebind={0} --membind={0} {1}".format(numanode, bin)
 
-num_thread = 64
 value_sizes = [120]
 # constant: value size always be "value_size",
 # random: value size uniformly distributed in [1, value_size]
@@ -28,10 +27,11 @@ benchmarks = [
 data_types = []
 
 if __name__ == "__main__":
-    usage = 'usage: run_benchmark.py [data type] [key distribution]\n\
-        data type can be "string", "sorted", "hash", "list", or "all"\n\
-        key distribution can be "random" or "zipf" or "all".'
-    if len(sys.argv) != 3:
+    usage = 'usage: run_benchmark.py[data type][key distribution]\n\'
+    'access_thread[access thread num] clean_thread[clean thread num]\n\'
+    'data type can be "string", "sorted", "hash", "list", or "all"\n\'
+    'key distribution can be "random" or "zipf" or "all".'
+    if len(sys.argv) != 6:
         print(usage)
         exit(1)
     if sys.argv[1] == 'string':
@@ -55,10 +55,14 @@ if __name__ == "__main__":
         key_distributions = ['zipf']
     elif sys.argv[2] == 'all':
         key_distributions = ['random', 'zipf']
+    elif sys.argv[3] == 'access_thread':
+        num_thread = sys.argv[4]
+    elif sys.argv[4] == 'clean_thread':
+        clean_thread = sys.argv[5]
     else:
         print(usage)
         exit(1)
 
     for [data_type, value_size, vsz_dist, k_dist] in itertools.product(data_types, value_sizes, value_size_distributions, key_distributions):
         benchmark_impl.run_benchmark(data_type, exec, pmem_path, pmem_size, populate_on_fill,
-                                     num_thread, num_collection, timeout, k_dist, value_size, vsz_dist, benchmarks)
+                                     num_thread, clean_num_thread, num_collection, timeout, k_dist, value_size, vsz_dist, benchmarks)

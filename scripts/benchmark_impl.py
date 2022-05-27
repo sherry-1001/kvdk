@@ -19,7 +19,8 @@ def __fill(exec, shared_para, data_type, report_path):
 
 def read_random(exec, shared_para, data_type, report_path, num_operations):
     new_para = shared_para + \
-        " -fill=0 -type={} -read_ratio=1 -num_operations={}".format(data_type, num_operations)
+        " -fill=0 -type={} -read_ratio=1 -num_operations={}".format(
+            data_type, num_operations)
     report = report_path + ("read_random" if (data_type != "list") else "pop")
     print("Read random {}".format(data_type))
     cmd = "{0} {1} > {2}".format(exec, new_para, report)
@@ -29,8 +30,10 @@ def read_random(exec, shared_para, data_type, report_path, num_operations):
 
 def insert_random(exec, shared_para, data_type, report_path, num_operations):
     new_para = shared_para + \
-        " -fill=0 -type={} -read_ratio=0 -existing_keys_ratio=0 -num_operations={}".format(data_type, num_operations)
-    report = report_path + ("insert_random" if (data_type != "list") else "push")
+        " -fill=0 -type={} -read_ratio=0 -existing_keys_ratio=0 -num_operations={}".format(
+            data_type, num_operations)
+    report = report_path + \
+        ("insert_random" if (data_type != "list") else "push")
     print("Insert random {}".format(data_type))
     cmd = "{0} {1} > {2}".format(exec, new_para, report)
     print(cmd)
@@ -42,7 +45,8 @@ def batch_insert_random(exec, shared_para, data_type, report_path, num_operation
         return
     new_para = shared_para + \
         " -fill=0 -type={} -read_ratio=0 -batch_size=100"\
-        " -existing_keys_ratio=0 -num_operations={}".format(data_type, num_operations)
+        " -existing_keys_ratio=0 -num_operations={}".format(
+            data_type, num_operations)
     report = report_path + "batch_insert_random"
     print("Batch insert random {}".format(data_type))
     cmd = "{0} {1} > {2}".format(exec, new_para, report)
@@ -54,7 +58,8 @@ def update_random(exec, shared_para, data_type, report_path, num_operations):
     if data_type == "list":
         return
     new_para = shared_para + \
-        " -fill=0 -type={} -read_ratio=0 -num_operations={}".format(data_type, num_operations)
+        " -fill=0 -type={} -read_ratio=0 -num_operations={}".format(
+            data_type, num_operations)
     report = report_path + "update_random"
     print("Update random {}".format(data_type))
     cmd = "{0} {1} > {2}".format(exec, new_para, report)
@@ -67,8 +72,10 @@ def read_write_random(exec, shared_para, data_type, report_path, num_operations)
     if data_type == "list":
         ratio = 0.5
     new_para = shared_para + \
-        " -fill=0 -type={} -read_ratio={} -num_operations={}".format(data_type, ratio, num_operations)
-    report = report_path + ("read_write_random" if (data_type != "list") else "pushpop")
+        " -fill=0 -type={} -read_ratio={} -num_operations={}".format(
+            data_type, ratio, num_operations)
+    report = report_path + \
+        ("read_write_random" if (data_type != "list") else "pushpop")
     print("Read write random {}".format(data_type))
     cmd = "{0} {1} > {2}".format(exec, new_para, report)
     print(cmd)
@@ -79,7 +86,8 @@ def range_scan(exec, shared_para, data_type, report_path, num_operations):
     if data_type == "string" or data_type == "list":
         return
     new_para = shared_para + \
-        " -fill=0 -type={} -read_ratio=1 -scan=1 -num_operations={}".format(data_type, num_operations)
+        " -fill=0 -type={} -read_ratio=1 -scan=1 -num_operations={}".format(
+            data_type, num_operations)
     report = report_path + "range_scan"
     print("Range scan {}".format(data_type))
     cmd = "{0} {1} > {2}".format(exec, new_para, report)
@@ -108,6 +116,7 @@ def run_benchmark(
     pmem_size,
     populate_on_fill,
     n_thread,
+    clean_n_thread,
     num_collection,
     timeout,
     key_distribution,
@@ -121,7 +130,8 @@ def run_benchmark(
     # calculate num kv to fill
     header_sz = 24 if (key_distribution == 'string') else 40
     k_sz = 8
-    avg_v_sz = value_size if (value_size_distribution == 'constant') else (value_size // 2)
+    avg_v_sz = value_size if (
+        value_size_distribution == 'constant') else (value_size // 2)
     avg_kv_size = (header_sz + k_sz + avg_v_sz + 63) // 64 * 64
 
     # 1/4 for fill, 1/4 for insert, 1/4 for batch_write
@@ -130,15 +140,16 @@ def run_benchmark(
     # create report dir
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
     git_hash = git.Repo(search_parent_directories=True).head.object.hexsha
-    report_path = "./results/commit-{0}/data_type-{1}-key_dist-{2}/vsize-{3}-vsize_dist-{4}-threads-{5}-collections-{6}-time-{7}/".format(
-        git_hash[0:8], 
+    report_path = "./results/commit-{0}/data_type-{1}-key_dist-{2}/vsize-{3}-vsize_dist-{4}-threads-{5}-collections-{6}-time-{7}-clean_threads-{8}/".format(
+        git_hash[0:8],
         data_type,
         key_distribution,
         value_size,
-        value_size_distribution, 
-        n_thread, 
-        num_collection, 
-        timestamp)
+        value_size_distribution,
+        n_thread,
+        num_collection,
+        timestamp,
+        clean_n_thread)
     os.system("mkdir -p {}".format(report_path))
 
     # run benchmarks
@@ -155,29 +166,31 @@ def run_benchmark(
         "-timeout={7} "\
         "-value_size={8} "\
         "-value_size_distribution={9} "\
-        "-key_distribution={10} ".format(
-        pmem_path, 
-        pmem_size, 
-        populate_on_fill, 
-        num_kv, 
-        n_thread, 
-        n_thread, 
-        num_collection, 
-        timeout, 
-        value_size, 
-        value_size_distribution,
-        key_distribution)
+        "-key_distribution={10} "\
+        "clean_threads={11}".format(
+            pmem_path,
+            pmem_size,
+            populate_on_fill,
+            num_kv,
+            n_thread,
+            n_thread,
+            num_collection,
+            timeout,
+            value_size,
+            value_size_distribution,
+            key_distribution,
+            clean_n_thread)
     # we always fill data before run benchmarks
     __fill(exec, shared_para, data_type, report_path)
     for benchmark in benchmarks:
         if (benchmark == read_random) \
-        or (benchmark == update_random) \
-        or (benchmark == range_scan) \
-        or (data_type == "blackhole") :
-                num_operations = 1024 * 1024 * 1024 * 10
+                or (benchmark == update_random) \
+                or (benchmark == range_scan) \
+                or (data_type == "blackhole"):
+            num_operations = 1024 * 1024 * 1024 * 10
         else:
             # __fill, insert_random, batch_insert_random, read_write_random
-            num_operations = num_kv 
+            num_operations = num_kv
 
         benchmark(exec, shared_para, data_type, report_path, num_operations)
 
