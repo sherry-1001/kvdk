@@ -2728,7 +2728,7 @@ TEST_F(EngineBasicTest, TestBackGroundCleaner) {
     }
   };
 
-  auto PutSorted = [&]() {
+  auto PutAndDeleteSorted = [&]() {
     for (int i = 0; i < cnt; ++i) {
       for (int index_with_hashtable : {0, 1}) {
         std::string sorted_collection =
@@ -2740,6 +2740,9 @@ TEST_F(EngineBasicTest, TestBackGroundCleaner) {
         ASSERT_EQ(engine->SortedCreate(sorted_collection, s_configs),
                   Status::Ok);
         ASSERT_EQ(engine->SortedPut(sorted_collection, key, val), Status::Ok);
+        if ((i % 2) != 0) {
+          ASSERT_EQ(engine->SortedDelete(sorted_collection, key), Status::Ok);
+        }
         bool set_expire = fast_random_64() % 2 == 0;
         if (set_expire) {
           ASSERT_EQ(engine->Expire(sorted_collection, 1), Status::Ok);
@@ -2760,9 +2763,15 @@ TEST_F(EngineBasicTest, TestBackGroundCleaner) {
         Status s = engine->GetTTL(sorted_collection, &ttl_time);
         if (s == Status::Ok) {
           if (ttl_time == kPersistTime) {
-            ASSERT_EQ(engine->SortedGet(sorted_collection, key, &got_val),
-                      Status::Ok);
-            ASSERT_EQ(got_val, val);
+            if ((i % 2) != 0) {
+              ASSERT_EQ(engine->SortedGet(sorted_collection, key, &got_val),
+                        Status::NotFound);
+            } else {
+              ASSERT_EQ(engine->SortedGet(sorted_collection, key, &got_val),
+                        Status::Ok);
+              ASSERT_EQ(got_val, val);
+            }
+
           } else {
             ASSERT_TRUE(ttl_time <= 1);
           }
@@ -2804,11 +2813,94 @@ TEST_F(EngineBasicTest, TestBackGroundCleaner) {
   }
 
   {
-    PutSorted();
+    PutAndDeleteSorted();
     auto t = std::thread(ExpiredClean);
     GetSorted();
     t.join();
   }
+  delete engine;
+}
+
+TEST_F(EngineBasicTest, TestBackGroundIterNoHashIndexSkiplist) {
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->Reset();
+  // abandon background cleaner thread
+  SyncPoint::GetInstance()->SetCallBack(
+      "KVEngine::backgroundCleaner::NothingToDo", [&](void* thread_id) {
+        *((size_t*)thread_id) = configs.clean_threads;
+        return;
+      });
+  SyncPoint::GetInstance()->SetCallBack(
+      "KVEngine::backgroundCleaner::RunOnceTime", [&](void* terminal) {
+        *((bool*)terminal) = true;
+        return;
+      });
+  SyncPoint::GetInstance()->LoadDependency(
+      {{"KVEngine::BackgroundCleaner::IterSkiplist::UnlinkDeleteRecord",
+        "KVEngine::SkiplistNoHashIndex::Put"}});
+  SyncPoint::GetInstance()->EnableProcessing();
+  uint64_t threads = 16;
+  configs.max_access_threads = threads;
+  ASSERT_EQ(Engine::Open(db_path.c_str(), &engine, configs, stdout),
+            Status::Ok);
+  std::string collection_name = "Skiplist_with_hash_index";
+  SortedCollectionConfigs s_configs;
+  s_configs.index_with_hashtable = false;
+  ASSERT_EQ(engine->SortedCreate(collection_name, s_configs), Status::Ok);
+  int cnt = 100;
+
+  // Two case: (1) record->old_record->old_record;
+  // (2)record->delete_record->old_record
+  auto PutAndDeleteSorted = [&]() {
+    for (int i = 0; i < cnt; ++i) {
+      std::string key = "sorted_key" + std::to_string(i);
+      std::string value = "sorted_value" + std::to_string(i);
+      ASSERT_EQ(engine->SortedPut(collection_name, key, value), Status::Ok);
+      if ((i % 2) == 0) {
+        ASSERT_EQ(engine->SortedDelete(collection_name, key), Status::Ok);
+      } else {
+        ASSERT_EQ(engine->SortedPut(collection_name, key,
+                                    "update_value" + std::to_string(i)),
+                  Status::Ok);
+      }
+
+      TEST_SYNC_POINT("KVEngine::SkiplistNoHashIndex::Put");
+      ASSERT_EQ(engine->SortedPut(collection_name, key,
+                                  "update_value_again" + std::to_string(i)),
+                Status::Ok);
+    }
+  };
+
+  auto backgroundCleaner = [&]() {
+    auto test_kvengine = static_cast<KVEngine*>(engine);
+    test_kvengine->CleanOutDated(0,
+                                 test_kvengine->GetHashTable()->GetSlotsNum());
+  };
+  std::vector<std::thread> ts;
+  ts.emplace_back(PutAndDeleteSorted);
+  ts.emplace_back(backgroundCleaner);
+  for (auto& t : ts) t.join();
+
+  int entries = 0;
+  // iterating sorted collection
+  auto iter = engine->NewSortedIterator(collection_name);
+  ASSERT_TRUE(iter != nullptr);
+  // forward iterator
+  iter->SeekToFirst();
+  if (iter->Valid()) {
+    ++entries;
+    std::string prev = iter->Key();
+    iter->Next();
+    while (iter->Valid()) {
+      ++entries;
+      std::string k = iter->Key();
+      iter->Next();
+      ASSERT_EQ(true, k.compare(prev) > 0);
+      prev = k;
+    }
+  }
+  engine->ReleaseSortedIterator(iter);
+  ASSERT_EQ(entries, cnt);
   delete engine;
 }
 #endif
