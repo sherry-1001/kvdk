@@ -32,6 +32,26 @@ struct PendingFreeSpaceEntry {
   TimeStampType release_time;
 };
 
+struct PendingPurgeStrRecords {
+  std::vector<StringRecord*> records;
+  TimeStampType release_time;
+};
+
+struct PendingPurgeDLRecords {
+  std::vector<DLRecord*> records;
+  TimeStampType release_time;
+};
+
+struct PendingCleanOutDatedRecords {
+  using ListPtr = std::unique_ptr<List>;
+  using HashListPtr = std::unique_ptr<HashList>;
+  std::deque<std::pair<TimeStampType, ListPtr>> outdated_lists;
+  std::deque<std::pair<TimeStampType, HashListPtr>> outdated_hash_lists;
+  std::deque<std::pair<TimeStampType, Skiplist*>> outdated_skip_lists;
+  std::deque<PendingPurgeStrRecords> pending_purge_strings;
+  std::deque<PendingPurgeDLRecords> pending_purge_dls;
+};
+
 // OldRecordsCleaner is used to clean old version PMem records of kvdk
 //
 // To support multi-version machenism and consistent backup of kvdk,

@@ -117,7 +117,7 @@ class KVEngine : public Engine {
   // Used by test case.
   HashTable* GetHashTable() { return hash_table_.get(); }
 
-  void CleanOutDated(size_t start_slot_idx, size_t end_slot_idx);
+  double CleanOutDated(size_t start_slot_idx, size_t end_slot_idx);
 
  private:
   friend OldRecordsCleaner;
@@ -591,7 +591,7 @@ class KVEngine : public Engine {
   // Run in background to free obsolete DRAM space
   void backgroundDramCleaner();
 
-  void backgroundCleanRecords(size_t start_slot_idx, size_t end_slot_idx);
+  void backgroundCleanRecords();
 
   void deleteCollections();
 
@@ -632,6 +632,8 @@ class KVEngine : public Engine {
   std::unique_ptr<SortedCollectionRebuilder> sorted_rebuilder_;
   VersionController version_controller_;
   OldRecordsCleaner old_records_cleaner_;
+  std::deque<PendingCleanOutDatedRecords> clean_records_set_;
+  SpinMutex clean_records_mtx_;
 
   ComparatorTable comparators_;
 
@@ -651,6 +653,8 @@ class KVEngine : public Engine {
   std::mutex checkpoint_lock_;
 
   BackgroundWorkSignals bg_work_signals_;
+
+  const size_t kSlotSegment = 1024;
 };
 
 }  // namespace KVDK_NAMESPACE

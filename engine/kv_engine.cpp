@@ -127,16 +127,17 @@ void KVEngine::startBackgroundWorks() {
   TEST_SYNC_POINT_CALLBACK("KVEngine::backgroundCleaner::NothingToDo",
                            &thread_id);
 
-  for (; thread_id < configs_.clean_threads; ++thread_id) {
-    if (thread_id == (configs_.clean_threads - 1)) {
-      bg_threads_.emplace_back(&KVEngine::CleanOutDated, this,
-                               thread_id * iter_slot_stride, total_slot_num);
-    } else {
-      bg_threads_.emplace_back(&KVEngine::CleanOutDated, this,
-                               thread_id * iter_slot_stride,
-                               (thread_id + 1) * iter_slot_stride);
-    }
-  }
+  // for (; thread_id < configs_.clean_threads; ++thread_id) {
+  //   if (thread_id == (configs_.clean_threads - 1)) {
+  //     bg_threads_.emplace_back(&KVEngine::CleanOutDated, this,
+  //                              thread_id * iter_slot_stride, total_slot_num);
+  //   } else {
+  //     bg_threads_.emplace_back(&KVEngine::CleanOutDated, this,
+  //                              thread_id * iter_slot_stride,
+  //                              (thread_id + 1) * iter_slot_stride);
+  //   }
+  // }
+  bg_threads_.emplace_back(&KVEngine::backgroundCleanRecords, this);
 }
 
 void KVEngine::terminateBackgroundWorks() {
