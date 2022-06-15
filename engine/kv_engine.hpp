@@ -33,6 +33,7 @@
 #include "sorted_collection/skiplist.hpp"
 #include "structures.hpp"
 #include "thread_manager.hpp"
+#include "thread_pool.hpp"
 #include "utils/utils.hpp"
 #include "version/old_records_cleaner.hpp"
 #include "version/version_controller.hpp"
@@ -117,8 +118,6 @@ class KVEngine : public Engine {
   // Used by test case.
   HashTable* GetHashTable() { return hash_table_.get(); }
 
-  double CleanOutDated(size_t start_slot_idx, size_t end_slot_idx);
-
  private:
   friend OldRecordsCleaner;
 
@@ -127,7 +126,8 @@ class KVEngine : public Engine {
         cleaner_thread_cache_(configs.max_access_threads),
         version_controller_(configs.max_access_threads),
         old_records_cleaner_(this, configs.max_access_threads),
-        comparators_(configs.comparator){};
+        comparators_(configs.comparator),
+        thread_pool_(configs.clean_threads){};
 
   struct EngineThreadCache {
     EngineThreadCache() = default;
@@ -492,6 +492,10 @@ class KVEngine : public Engine {
   void cleanNoHashIndexedSkiplist(Skiplist* skiplist,
                                   std::vector<DLRecord*>& purge_dl_records);
 
+  void cleanSlotBlockOutDated(size_t start_slot_idx, size_t slot_block);
+
+  void prugeAndFreeAllType(PendingPrugeFreeRecords& pending_clean_records);
+
   void delayFree(DLRecord* addr);
 
   void directFree(DLRecord* addr);
@@ -599,11 +603,13 @@ class KVEngine : public Engine {
   // Run in background to free obsolete DRAM space
   void backgroundDramCleaner();
 
-  void backgroundCleanRecords();
+  // void backgroundCleanRecords();
 
   void deleteCollections();
 
   void startBackgroundWorks();
+
+  void CleanOutDated(size_t start_slot_idx, size_t end_slot_idx);
 
   void terminateBackgroundWorks();
 
@@ -641,10 +647,10 @@ class KVEngine : public Engine {
   std::unique_ptr<SortedCollectionRebuilder> sorted_rebuilder_;
   VersionController version_controller_;
   OldRecordsCleaner old_records_cleaner_;
-  std::deque<PendingCleanOutDatedRecords> clean_records_set_;
-  SpinMutex clean_records_mtx_;
 
   ComparatorTable comparators_;
+
+  ThreadPool thread_pool_;
 
   struct BackgroundWorkSignals {
     BackgroundWorkSignals() = default;
@@ -664,6 +670,8 @@ class KVEngine : public Engine {
   BackgroundWorkSignals bg_work_signals_;
 
   std::atomic<int64_t> round_robin_id_{-1};
+
+  std::atomic<bool> is_sleep{false};
 };
 
 }  // namespace KVDK_NAMESPACE
