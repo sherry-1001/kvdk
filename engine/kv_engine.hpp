@@ -33,6 +33,7 @@
 #include "sorted_collection/skiplist.hpp"
 #include "structures.hpp"
 #include "thread_manager.hpp"
+#include "thread_pool.hpp"
 #include "utils/utils.hpp"
 #include "version/old_records_cleaner.hpp"
 #include "version/version_controller.hpp"
@@ -127,7 +128,8 @@ class KVEngine : public Engine {
         cleaner_thread_cache_(configs.max_access_threads),
         version_controller_(configs.max_access_threads),
         old_records_cleaner_(this, configs.max_access_threads),
-        comparators_(configs.comparator){};
+        comparators_(configs.comparator),
+        thread_pool_(configs_.clean_threads){};
 
   struct EngineThreadCache {
     EngineThreadCache() = default;
@@ -662,6 +664,8 @@ class KVEngine : public Engine {
   BackgroundWorkSignals bg_work_signals_;
 
   std::atomic<int64_t> round_robin_id_{-1};
+
+  ThreadPool thread_pool_;
 };
 
 }  // namespace KVDK_NAMESPACE
