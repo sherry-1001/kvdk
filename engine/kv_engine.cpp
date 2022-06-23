@@ -120,26 +120,13 @@ void KVEngine::startBackgroundWorks() {
   bg_threads_.emplace_back(&KVEngine::backgroundPMemAllocatorOrgnizer, this);
   bg_threads_.emplace_back(&KVEngine::backgroundDramCleaner, this);
   bg_threads_.emplace_back(&KVEngine::backgroundPMemUsageReporter, this);
-  // bg_threads_.emplace_back(&KVEngine::backgroundCleanRecords, this);
+  // bg_threads_.emplace_back(&KVEngine::backgroundReclaimer, this);
+  // space_reclaimer_.AdjustThread(32);
 
   auto total_slot_num = hash_table_->GetSlotsNum();
   size_t iter_slot_stride = total_slot_num / configs_.clean_threads;
   size_t thread_id = 0;
-
   for (; thread_id < configs_.clean_threads; ++thread_id) {
-    // if (thread_id == (configs_.clean_threads - 1)) {
-    //   auto start_idx = thread_id * iter_slot_stride;
-    //   auto end_idx = total_slot_num;
-    //   thread_pool_.PushTask(
-    //       [this, start_idx, end_idx]() { CleanOutDated(start_idx, end_idx);
-    //       });
-    // } else {
-    //   auto start_idx = thread_id * iter_slot_stride;
-    //   auto end_idx = (thread_id + 1) * iter_slot_stride;
-    //   thread_pool_.PushTask(
-    //       [this, start_idx, end_idx]() { CleanOutDated(start_idx, end_idx);
-    //       });
-    // }
     if (thread_id == (configs_.clean_threads - 1)) {
       bg_threads_.emplace_back(&KVEngine::CleanOutDated, this,
                                thread_id * iter_slot_stride, total_slot_num);

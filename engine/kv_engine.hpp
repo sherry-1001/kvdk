@@ -120,6 +120,7 @@ class KVEngine : public Engine {
 
  private:
   friend OldRecordsCleaner;
+  friend SpaceReclaimer;
 
   KVEngine(const Configs& configs)
       : engine_thread_cache_(configs.max_access_threads),
@@ -127,7 +128,7 @@ class KVEngine : public Engine {
         version_controller_(configs.max_access_threads),
         old_records_cleaner_(this, configs.max_access_threads),
         comparators_(configs.comparator),
-        thread_pool_(configs.clean_threads){};
+        space_reclaimer_(this, configs.clean_threads){};
 
   struct EngineThreadCache {
     EngineThreadCache() = default;
@@ -492,7 +493,10 @@ class KVEngine : public Engine {
   void cleanNoHashIndexedSkiplist(Skiplist* skiplist,
                                   std::vector<DLRecord*>& purge_dl_records);
 
-  void cleanSlotBlockOutDated(size_t start_slot_idx, size_t slot_block);
+  double cleanSlotBlockOutDated(PendingPrugeFreeRecords& pending_clean_records,
+                                size_t start_slot_idx, size_t slot_block_size);
+
+                                void CleanOutDated(size_t start_slot_idx, size_t end_slot_idx);
 
   void prugeAndFreeAllType(PendingPrugeFreeRecords& pending_clean_records);
 
@@ -603,13 +607,11 @@ class KVEngine : public Engine {
   // Run in background to free obsolete DRAM space
   void backgroundDramCleaner();
 
-  // void backgroundCleanRecords();
+  void backgroundReclaimer();
 
   void deleteCollections();
 
   void startBackgroundWorks();
-
-  void CleanOutDated(size_t start_slot_idx, size_t end_slot_idx);
 
   void terminateBackgroundWorks();
 
@@ -647,11 +649,9 @@ class KVEngine : public Engine {
   std::unique_ptr<SortedCollectionRebuilder> sorted_rebuilder_;
   VersionController version_controller_;
   OldRecordsCleaner old_records_cleaner_;
+  SpaceReclaimer space_reclaimer_;
 
   ComparatorTable comparators_;
-
-  ThreadPool thread_pool_;
-
   struct BackgroundWorkSignals {
     BackgroundWorkSignals() = default;
     BackgroundWorkSignals(const BackgroundWorkSignals&) = delete;
@@ -670,8 +670,6 @@ class KVEngine : public Engine {
   BackgroundWorkSignals bg_work_signals_;
 
   std::atomic<int64_t> round_robin_id_{-1};
-
-  std::atomic<bool> is_sleep{false};
 };
 
 }  // namespace KVDK_NAMESPACE
